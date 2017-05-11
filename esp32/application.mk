@@ -115,7 +115,6 @@ APP_MODS_SRC_C = $(addprefix mods/,\
 	modwlan.c \
 	moduselect.c \
 	modutime.c \
-	modpycom.c \
 	moduhashlib.c \
 	moducrypto.c \
 	machtimer.c \
@@ -311,7 +310,7 @@ ESPBAUD ?= 921600
 
 FLASH_SIZE = 4MB
 
-ESPFLASHMODE = qio
+ESPFLASHMODE = dio
 ESPFLASHFREQ = 40m
 ESPTOOLPY = $(PYTHON) $(IDF_PATH)/components/esptool_py/esptool/esptool.py --chip esp32
 ESPTOOLPY_SERIAL = $(ESPTOOLPY) --port $(ESPPORT) --baud $(ESPBAUD)
