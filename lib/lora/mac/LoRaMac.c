@@ -22,6 +22,7 @@ Maintainer: Miguel Luis ( Semtech ), Gregory Cristian ( Semtech ) and Daniel Jä
 #include "LoRaMacCrypto.h"
 #include "LoRaMac.h"
 #include "LoRaMacTest.h"
+#include "modlora.h"
 
 /*!
  * Maximum PHY layer payload size
@@ -1554,7 +1555,7 @@ static void OnTxDelayedTimerEvent( void )
 
 IRAM_ATTR static void OnRxWindow1TimerEvent( void )
 {
-    uint16_t symbTimeout = 8; // DR_2, DR_1, DR_0
+    uint16_t symbTimeout = 24; // DR_2, DR_1, DR_0
     int8_t datarate = 0;
     uint32_t bandwidth = 0; // LoRa 125 kHz
 
@@ -1576,16 +1577,16 @@ IRAM_ATTR static void OnRxWindow1TimerEvent( void )
     // For higher datarates, we increase the number of symbols generating a Rx Timeout
     if( ( datarate == DR_3 ) || ( datarate == DR_4 ) )
     { // DR_4, DR_3
-        symbTimeout = 12;
+        symbTimeout = 48;
     }
     else if( datarate == DR_5 )
     {
-        symbTimeout = 15;
+        symbTimeout = 72;
     }
     else if( datarate == DR_6 )
     {// LoRa 250 kHz
         bandwidth  = 1;
-        symbTimeout = 20;
+        symbTimeout = 96;
     }
     RxWindowSetup( Channels[Channel].Frequency, datarate, bandwidth, symbTimeout, false );
 #elif ( defined( USE_BAND_915 ) || defined( USE_BAND_915_HYBRID ) )
@@ -1598,7 +1599,7 @@ IRAM_ATTR static void OnRxWindow1TimerEvent( void )
     switch( datarate )
     {
         case DR_0:       // SF10 - BW125
-            symbTimeout = 8;
+            symbTimeout = 24;
             break;
 
         case DR_1:       // SF9  - BW125
@@ -1606,21 +1607,21 @@ IRAM_ATTR static void OnRxWindow1TimerEvent( void )
         case DR_8:       // SF12 - BW500
         case DR_9:       // SF11 - BW500
         case DR_10:      // SF10 - BW500
-            symbTimeout = 12;
+            symbTimeout = 48;
             break;
 
         case DR_3:       // SF7  - BW125
         case DR_11:      // SF9  - BW500
-            symbTimeout = 15;
+            symbTimeout = 72;
             break;
 
         case DR_4:       // SF8  - BW500
         case DR_12:      // SF8  - BW500
-            symbTimeout = 20;
+            symbTimeout = 96;
             break;
 
         case DR_13:      // SF7  - BW500
-            symbTimeout = 24;
+            symbTimeout = 120;
             break;
         default:
             break;
@@ -1637,7 +1638,7 @@ IRAM_ATTR static void OnRxWindow1TimerEvent( void )
 
 IRAM_ATTR static void OnRxWindow2TimerEvent( void )
 {
-    uint16_t symbTimeout = 8; // DR_2, DR_1, DR_0
+    uint16_t symbTimeout = 48; // DR_2, DR_1, DR_0
     uint32_t bandwidth = 0; // LoRa 125 kHz
 
     TimerStop( &RxWindowTimer2 );
@@ -1647,23 +1648,23 @@ IRAM_ATTR static void OnRxWindow2TimerEvent( void )
     // For higher datarates, we increase the number of symbols generating a Rx Timeout
     if( ( LoRaMacParams.Rx2Channel.Datarate == DR_3 ) || ( LoRaMacParams.Rx2Channel.Datarate == DR_4 ) )
     { // DR_4, DR_3
-        symbTimeout = 12;
+        symbTimeout = 96;
     }
     else if( LoRaMacParams.Rx2Channel.Datarate == DR_5 )
     {
-        symbTimeout = 15;
+        symbTimeout = 144;
     }
     else if( LoRaMacParams.Rx2Channel.Datarate == DR_6 )
     {// LoRa 250 kHz
         bandwidth  = 1;
-        symbTimeout = 20;
+        symbTimeout = 192;
     }
 #elif ( defined( USE_BAND_915 ) || defined( USE_BAND_915_HYBRID ) )
     // For higher datarates, we increase the number of symbols generating a Rx Timeout
     switch( LoRaMacParams.Rx2Channel.Datarate )
     {
         case DR_0:       // SF10 - BW125
-            symbTimeout = 8;
+            symbTimeout = 48;
             break;
 
         case DR_1:       // SF9  - BW125
@@ -1671,21 +1672,21 @@ IRAM_ATTR static void OnRxWindow2TimerEvent( void )
         case DR_8:       // SF12 - BW500
         case DR_9:       // SF11 - BW500
         case DR_10:      // SF10 - BW500
-            symbTimeout = 12;
+            symbTimeout = 96;
             break;
 
         case DR_3:       // SF7  - BW125
         case DR_11:      // SF9  - BW500
-            symbTimeout = 15;
+            symbTimeout = 144;
             break;
 
         case DR_4:       // SF8  - BW500
         case DR_12:      // SF8  - BW500
-            symbTimeout = 20;
+            symbTimeout = 192;
             break;
 
         case DR_13:      // SF7  - BW500
-            symbTimeout = 24;
+            symbTimeout = 240;
             break;
         default:
             break;
@@ -2844,10 +2845,21 @@ static int8_t AlternateDatarate( uint16_t nbTrials )
     // Re-enable 500 kHz default channels
     ReenableChannels( LoRaMacParams.ChannelsMask[4], LoRaMacParams.ChannelsMask );
 #endif
-
-    if( ( nbTrials & 0x01 ) == 0x01 )
+    if( ( nbTrials % 32 ) == 0 )
     {
         datarate = DR_0;
+    }
+    else if( ( nbTrials % 24 ) == 0 )
+    {
+        datarate = DR_1;
+    }
+    else if( ( nbTrials % 16 ) == 0 )
+    {
+        datarate = DR_2;
+    }
+    else if( ( nbTrials % 8 ) == 0 )
+    {
+        datarate = DR_3;
     }
     else
     {
@@ -3290,7 +3302,7 @@ LoRaMacStatus_t LoRaMacInitialization( LoRaMacPrimitives_t *primitives, LoRaMacC
 
 LoRaMacStatus_t LoRaMacQueryTxPossible( uint8_t size, LoRaMacTxInfo_t* txInfo )
 {
-    int8_t datarate = LoRaMacParamsDefaults.ChannelsDatarate;
+    int8_t datarate = LoRaMacParams.ChannelsDatarate;
     uint8_t fOptLen = MacCommandsBufferIndex + MacCommandsBufferToRepeatIndex;
 
     if( txInfo == NULL )
@@ -4095,6 +4107,12 @@ LoRaMacStatus_t LoRaMacMlmeRequest( MlmeReq_t *mlmeRequest )
     LoRaMacStatus_t status = LORAMAC_STATUS_SERVICE_UNKNOWN;
     LoRaMacHeader_t macHdr;
 
+#if defined(USE_BAND_868)
+    uint8_t DRToCounter[6] = { 47, 31, 23, 15, 7, 0 };
+#else
+    uint8_t DRToCounter[5] = { 31, 23, 15, 7, 0 };
+#endif
+
     if( mlmeRequest == NULL )
     {
         return LORAMAC_STATUS_PARAMETER_INVALID;
@@ -4136,6 +4154,11 @@ LoRaMacStatus_t LoRaMacMlmeRequest( MlmeReq_t *mlmeRequest )
             macHdr.Bits.MType  = FRAME_TYPE_JOIN_REQ;
 
             ResetMacParameters( );
+
+            if( JoinRequestTrials == 0 && mlmeRequest->Req.Join.DR < sizeof(DRToCounter) )
+            {
+                JoinRequestTrials = DRToCounter[mlmeRequest->Req.Join.DR];
+            }
 
             JoinRequestTrials++;
             LoRaMacParams.ChannelsDatarate = AlternateDatarate( JoinRequestTrials );
@@ -4269,6 +4292,18 @@ void LoRaMacTestSetMic( uint16_t txPacketCounter )
 {
     UpLinkCounter = txPacketCounter;
     IsUpLinkCounterFixed = true;
+}
+
+void LoRaMacNvsSave( void )
+{
+    modlora_nvs_set_uint(E_LORA_NVS_ELE_DWLINK, DownLinkCounter);
+    modlora_nvs_set_uint(E_LORA_NVS_ELE_UPLINK, UpLinkCounter);
+
+    modlora_nvs_set_blob(E_LORA_NVS_ELE_NWSKEY, LoRaMacNwkSKey, sizeof(LoRaMacNwkSKey));
+    modlora_nvs_set_blob(E_LORA_NVS_ELE_APPSKEY, LoRaMacAppSKey, sizeof(LoRaMacAppSKey));
+
+    modlora_nvs_set_uint(E_LORA_NVS_ELE_NET_ID, LoRaMacNetID);
+    modlora_nvs_set_uint(E_LORA_NVS_ELE_DEVADDR, LoRaMacDevAddr);
 }
 
 void LoRaMacTestSetDutyCycleOn( bool enable )

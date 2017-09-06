@@ -10,12 +10,15 @@
 #ifndef MODLORA_H_
 #define MODLORA_H_
 
+#include "board.h"
+#include "lora/mac/LoRaMac.h"
+
 /******************************************************************************
  DEFINE CONSTANTS
  ******************************************************************************/
 #define LORA_PAYLOAD_SIZE_MAX                                   (255)
 #define LORA_CMD_QUEUE_SIZE_MAX                                 (2)
-#define LORA_DATA_QUEUE_SIZE_MAX                                (2)
+#define LORA_DATA_QUEUE_SIZE_MAX                                (3)
 #define LORA_STACK_SIZE                                         (3072)
 #define LORA_TASK_PRIORITY                                      (6)
 
@@ -36,24 +39,37 @@ typedef enum {
     E_LORA_CMD_WAKE_UP,
 } lora_cmd_t;
 
+typedef enum {
+    E_LORA_NVS_ELE_JOINED = 0,
+    E_LORA_NVS_ELE_UPLINK,
+    E_LORA_NVS_ELE_DWLINK,
+    E_LORA_NVS_ELE_DEVADDR,
+    E_LORA_NVS_ELE_NWSKEY,
+    E_LORA_NVS_ELE_APPSKEY,
+    E_LORA_NVS_ELE_NET_ID,
+    E_LORA_NVS_NUM_KEYS
+} e_lora_nvs_key_t;
+
 typedef struct {
-    uint32_t    frequency;
-    uint8_t     stack_mode;
-    uint8_t     preamble;
-    uint8_t     bandwidth;
-    uint8_t     coding_rate;
-    uint8_t     sf;
-    uint8_t     tx_power;
-    uint8_t     power_mode;
-    uint8_t     tx_retries;
-    bool        txiq;
-    bool        rxiq;
-    bool        adr;
-    bool        public;
+    uint32_t        frequency;
+    DeviceClass_t   device_class;
+    uint8_t         stack_mode;
+    uint8_t         preamble;
+    uint8_t         bandwidth;
+    uint8_t         coding_rate;
+    uint8_t         sf;
+    uint8_t         tx_power;
+    uint8_t         power_mode;
+    uint8_t         tx_retries;
+    bool            txiq;
+    bool            rxiq;
+    bool            adr;
+    bool            public;
 } lora_init_cmd_data_t;
 
 typedef struct {
     uint8_t activation;
+    uint8_t otaa_dr;
     union {
         struct {
             // For over the air activation
@@ -104,6 +120,7 @@ typedef struct {
 typedef struct {
     uint8_t data[LORA_PAYLOAD_SIZE_MAX + 1];
     uint8_t len;
+    uint8_t port;
 } lora_rx_data_t;
 
 /******************************************************************************
@@ -114,5 +131,9 @@ typedef struct {
  DECLARE FUNCTIONS
  ******************************************************************************/
 extern void modlora_init0(void);
+extern bool modlora_nvs_set_uint(uint32_t key_idx, uint32_t value);
+extern bool modlora_nvs_set_blob(uint32_t key_idx, const void *value, uint32_t length);
+extern bool modlora_nvs_get_uint(uint32_t key_idx, uint32_t *value);
+extern bool modlora_nvs_get_blob(uint32_t key_idx, void *value, uint32_t *length);
 
 #endif  // MODLORA_H_

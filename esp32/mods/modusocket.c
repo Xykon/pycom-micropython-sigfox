@@ -9,6 +9,33 @@
  * https://www.pycom.io/opensource/licensing
  */
 
+/*
+ * This file is part of the Micro Python project, http://micropython.org/
+ *
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2013, 2014 Damien P. George
+ * Copyright (c) 2015 Daniel Campora
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
 #include <stdint.h>
 #include <string.h>
 
@@ -24,7 +51,7 @@
 #include "modusocket.h"
 #include "mpexception.h"
 
-#include "heap_alloc_caps.h"
+#include "esp_heap_caps.h"
 #include "sdkconfig.h"
 #include "esp_system.h"
 #include "esp_spi_flash.h"
@@ -264,8 +291,8 @@ STATIC mp_obj_t socket_accept(mp_obj_t self_in) {
         nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
     }
 
-    // add the socket to the list
     MP_THREAD_GIL_ENTER();
+    // add the socket to the list
     modusocket_socket_add(socket2->sock_base.sd, true);
 
     // make the return value
@@ -397,7 +424,15 @@ STATIC mp_obj_t socket_recvfrom(mp_obj_t self_in, mp_obj_t len_in) {
         vstr.buf[vstr.len] = '\0';
         tuple[0] = mp_obj_new_str_from_vstr(&mp_type_bytes, &vstr);
     }
+#ifdef LOPY
+    if (self->sock_base.nic_type == &mod_network_nic_type_lora) {
+        tuple[1] = mp_obj_new_int(port);
+    } else {
+        tuple[1] = netutils_format_inet_addr(ip, port, NETUTILS_LITTLE);
+    }
+#else
     tuple[1] = netutils_format_inet_addr(ip, port, NETUTILS_LITTLE);
+#endif
     return mp_obj_new_tuple(2, tuple);
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(socket_recvfrom_obj, socket_recvfrom);
@@ -513,6 +548,7 @@ STATIC const mp_map_elem_t raw_socket_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_close),           (mp_obj_t)&socket_close_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_send),            (mp_obj_t)&socket_send_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_recv),            (mp_obj_t)&socket_recv_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_recvfrom),        (mp_obj_t)&socket_recvfrom_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_settimeout),      (mp_obj_t)&socket_settimeout_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_bind),            (mp_obj_t)&socket_bind_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_setblocking),     (mp_obj_t)&socket_setblocking_obj },
@@ -534,7 +570,9 @@ MP_DEFINE_CONST_DICT(raw_socket_locals_dict, raw_socket_locals_dict_table);
 
 STATIC mp_uint_t socket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int *errcode) {
     mod_network_socket_obj_t *self = self_in;
+    MP_THREAD_GIL_EXIT();
     mp_int_t ret = self->sock_base.nic_type->n_recv(self, buf, size, errcode);
+    MP_THREAD_GIL_ENTER();
     if (ret < 0) {
 //        // we need to ignore the socket closed error here because a readall() or read() without params
 //        // only returns when the socket is closed by the other end
@@ -549,7 +587,9 @@ STATIC mp_uint_t socket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int *e
 
 STATIC mp_uint_t socket_write(mp_obj_t self_in, const void *buf, mp_uint_t size, int *errcode) {
     mod_network_socket_obj_t *self = self_in;
+    MP_THREAD_GIL_EXIT();
     mp_int_t ret = self->sock_base.nic_type->n_send(self, buf, size, errcode);
+    MP_THREAD_GIL_ENTER();
     if (ret < 0) {
         ret = MP_STREAM_ERROR;
     }

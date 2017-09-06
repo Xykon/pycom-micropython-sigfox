@@ -967,6 +967,10 @@ typedef struct sMlmeReqJoin
      * LoRaWAN Specification V1.0.1, chapter 6.2.2
      */
     uint8_t *AppKey;
+    /*!
+     * To support initial data rate selection for the Join Request
+     */
+    uint8_t DR;
 }MlmeReqJoin_t;
 
 /*!
@@ -1771,6 +1775,8 @@ LoRaMacStatus_t LoRaMacMcpsRequest( McpsReq_t *mcpsRequest );
  *          the frame]
  */
 bool ValidatePayloadLength( uint8_t lenN, int8_t datarate, uint8_t fOptsLen );
+
+void LoRaMacNvsSave( void );
 
 /*! \} defgroup LORAMAC */
 

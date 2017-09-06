@@ -1,8 +1,8 @@
 .. _pycom_tutorial_index:
 
-********************************
-3. Tutorials and examples
-********************************
+***********************
+3. Tutorials & Examples
+***********************
 
 Great, so you’ve connected your board and ran some basic scripts,
 now it’s time to delve a little deeper. This section contains some
@@ -25,3 +25,11 @@ in the **pycom-libraries** repository on Pycom's Github account `here <https://g
 .. include:: lopy.rst
 
 .. include:: sipy.rst
+
+.. include:: pysense.rst
+
+.. include:: pytrack.rst
+
+.. note::
+
+	If you are using Windows 7 for either the Pysense or Pytrack, please see the following :ref:`section <windows_7_driver>` for the required drivers.

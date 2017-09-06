@@ -59,14 +59,14 @@ Maintainer: Miguel Luis and Gregory Cristian
  * Board MCU pins definitions
  */
 
-#define RADIO_RESET                                 MICROPY_LPWAN_RESET_PIN_NAME
+#define RADIO_RESET                                 micropy_lpwan_reset_pin_index
 
 #define RADIO_MOSI                                  GPIO27
 #define RADIO_MISO                                  GPIO19
 #define RADIO_SCLK                                  GPIO5
-#define RADIO_NSS                                   MICROPY_LPWAN_NCS_PIN_NAME
+#define RADIO_NSS                                   micropy_lpwan_ncs_pin_index
 
-#define RADIO_DIO                                   MICROPY_LPWAN_DIO_PIN_NAME
+#define RADIO_DIO                                   micropy_lpwan_dio_pin_index
 
 void BoardInitPeriph( void );
 
@@ -79,5 +79,7 @@ uint32_t BoardGetRandomSeed( void );
 void BoardGetUniqueId( uint8_t *id );
 
 uint8_t BoardGetBatteryLevel( void );
+
+void BoardSetBatteryLevel( uint8_t level );
 
 #endif // LORA_BOARD_H_
