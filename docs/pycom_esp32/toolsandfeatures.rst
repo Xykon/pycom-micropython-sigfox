@@ -5,7 +5,7 @@
 2.1 Intro
 =========
 
-Do you have your basic setup working? Then it's time to look at all the ways you can use and interact with your board. We'll look at some more features of Pymakr and see how we can use telnet, FTP and how to reset the board.
+Do you have your basic setup working? Then it's time to look at all the ways you can use and interact with your board. We'll look at some more features of the Pymakr Plugin and see how we can use telnet, FTP and how to reset the board.
 
 Contents
 
@@ -14,8 +14,8 @@ Contents
 - :ref:`2.4 Local file system and FTP access <pycom_filesystem>`
 - :ref:`2.5 Boot modes and safe boot <safeboot>`
 - :ref:`2.6 Interrupt handling <pycom_interrupt_handling>`
-- :ref:`2.7 Pymakr IDE <pymakr_ide>`
-
+- :ref:`2.7 Pymakr Plugin <pymakr_ide>`
+- :ref:`2.8 Updating Pysense and Pytrack firmware <pysense_pytrack_firmware>`
 
 .. _main_features:
 
@@ -42,7 +42,7 @@ All members in the current family of Pycom modules are powered by the ESP32, off
 - :class:`LoRa <.LoRa>` (only available in the LoPy)
 - :mod:`hashlib <.uhashlib>` MD5, SHA1, SHA256, SHA384 and SHA512 hash algorithms
 - :class:`AES encryption <.AES>`
-- :mod:`SSL/TLS support <.ussl>``
+- :mod:`SSL/TLS support <.ussl>`
 
 Click the links in the list above to see more details on that feature.
 For all available modules and libraries, please visit the :ref:`Firmware API
@@ -97,6 +97,8 @@ The following control commands are available in REPL:
 - ``Ctrl-E`` enters 'paste mode' that allows you to copy and paste chuncks of text. Finish using ``Ctrl-d``
 
 Instructions on how to connect can be found in the two chapters below. A small tutorial on :ref:`how to use the REPL <repl_tutorial>` is available in chapter :ref:`3. Tutorials and Examples`
+
+.. _pycom_telnet_connect:
 
 Mac OS X and Linux
 -------------------
@@ -194,7 +196,7 @@ data connections are possible. Other FTP clients might behave in a similar way.
     :scale: 60 %
 
 .. image:: images/filezilla-settings-2.png
-    :alt: Filezilla 1
+    :alt: Filezilla 2
     :align: center
     :scale: 60 %
 
@@ -289,7 +291,9 @@ The programmer can do whatever is needed inside the callback, such as creating n
 or even sending network packets. Just keep in mind that interrupts are processed sequentially,
 so try to keep the handlers as quick as possible in order to attend them all in a short time.
 
-Currently there are 2 classes supporting interrupts, there the :class:`Alarm <.Alarm>` class and the :class:`Pin <.Pin>`. Both classes provide the ``.callback()`` method that enables the interrupt and registers the given handler. More details about the usage along with examples can be found in their respective sections.
+Currently there are 2 classes supporting interrupts, there the :class:`Alarm <.Alarm>` class and the :class:`Pin <.Pin>`.
+Both classes provide the ``.callback()`` method that enables the interrupt and registers the given handler.
+More details about the usage along with examples can be found in their respective sections.
 
 .. note::
 
@@ -298,3 +302,7 @@ Currently there are 2 classes supporting interrupts, there the :class:`Alarm <.A
 .. _pymakr_ide:
 
 .. include:: pymakr.rst
+
+.. _pysense_pytrack_firmware:
+
+.. include:: pysensefirmware.rst

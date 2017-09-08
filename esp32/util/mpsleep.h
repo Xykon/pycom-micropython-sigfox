@@ -22,9 +22,17 @@ typedef enum {
     MPSLEEP_PWRON_RESET = 0,
     MPSLEEP_HARD_RESET,
     MPSLEEP_WDT_RESET,
-    MPSLEEP_HIB_RESET,
-    MPSLEEP_SOFT_RESET
+    MPSLEEP_DEEPSLEEP_RESET,
+    MPSLEEP_SOFT_RESET,
+    MPSLEEP_BROWN_OUT_RESET,
 } mpsleep_reset_cause_t;
+
+typedef enum {
+    MPSLEEP_PWRON_WAKE = 0,
+    MPSLEEP_GPIO_WAKE,
+    MPSLEEP_RTC_WAKE,
+    MPSLEEP_ULP_WAKE
+} mpsleep_wake_reason_t;
 
 /******************************************************************************
  DECLARE FUNCTIONS
@@ -32,5 +40,6 @@ typedef enum {
 void mpsleep_init0 (void);
 void mpsleep_signal_soft_reset (void);
 mpsleep_reset_cause_t mpsleep_get_reset_cause (void);
+mpsleep_wake_reason_t mpsleep_get_wake_reason (void);
 
 #endif /* MPSLEEP_H_ */

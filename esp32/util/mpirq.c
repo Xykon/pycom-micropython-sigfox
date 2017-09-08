@@ -22,25 +22,39 @@
 
 #if MICROPY_PY_THREAD
 
+typedef struct {
+    mp_obj_dict_t *dict_locals;
+    mp_obj_dict_t *dict_globals;
+} mpirq_args_t;
+
 /******************************************************************************
  DECLARE PRIVATE DATA
  ******************************************************************************/
 STATIC QueueHandle_t InterruptsQueue;
 STATIC bool mp_irq_is_alive;
 
+STATIC mpirq_args_t mpirq_args;
+
 /******************************************************************************
  DECLARE PRIVATE FUNCTIONS
  ******************************************************************************/
 static void *TASK_Interrupts(void *pvParameters) {
+    mpirq_args_t *args = (mpirq_args_t *)pvParameters;
+
     mp_callback_obj_t cb;
     mp_state_thread_t ts;
     mp_thread_set_state(&ts);
 
     mp_stack_set_top(&ts + 1); // need to include ts in root-pointer scan
-    mp_stack_set_limit(INTERRUPTS_TASK_STACK_SIZE);
+    mp_stack_set_limit(INTERRUPTS_TASK_STACK_SIZE - 1024);
 
-    // signal that we are set up and running
+    mp_locals_set(args->dict_locals);
+    mp_globals_set(args->dict_globals);
+
+    MP_THREAD_GIL_ENTER();
+    // signal that we are up and running
     mp_thread_start();
+    MP_THREAD_GIL_EXIT();
 
     for (;;) {
         xQueueReceive(InterruptsQueue, &cb, portMAX_DELAY);
@@ -70,6 +84,11 @@ static void *TASK_Interrupts(void *pvParameters) {
         MP_THREAD_GIL_EXIT();
     }
 
+    MP_THREAD_GIL_ENTER();
+    // signal that we are finished
+    mp_thread_finish();
+    MP_THREAD_GIL_EXIT();
+
     mp_irq_is_alive = false;
 
     return NULL;
@@ -90,7 +109,37 @@ void mp_irq_init0(void) {
 
     mp_irq_is_alive = true;
     xQueueReset(InterruptsQueue);
-    mp_thread_create_ex(TASK_Interrupts, NULL, &stack_size, INTERRUPTS_TASK_PRIORITY, "IRQs");
+
+    mpirq_args.dict_locals = mp_locals_get();
+    mpirq_args.dict_globals = mp_globals_get();
+
+    mp_thread_create_ex(TASK_Interrupts, &mpirq_args, &stack_size, INTERRUPTS_TASK_PRIORITY, "IRQs");
+}
+
+void mp_irq_add (mp_obj_t parent, mp_obj_t handler) {
+    mp_obj_tuple_t *irq = mp_obj_new_tuple(2, NULL);
+    irq->items[0] = parent;
+    irq->items[1] = handler;
+    // remove it in case it was already registered
+    mp_irq_remove(parent);
+    mp_obj_list_append(&MP_STATE_PORT(mp_irq_obj_list), irq);
+}
+
+void mp_irq_remove (const mp_obj_t parent) {
+    mp_obj_tuple_t *irq;
+    if ((irq = mp_irq_find(parent))) {
+        mp_obj_list_remove(&MP_STATE_PORT(mp_irq_obj_list), irq);
+    }
+}
+
+mp_obj_tuple_t *mp_irq_find (mp_obj_t parent) {
+    for (mp_uint_t i = 0; i < MP_STATE_PORT(mp_irq_obj_list).len; i++) {
+        mp_obj_tuple_t *irq = ((mp_obj_tuple_t *)(MP_STATE_PORT(mp_irq_obj_list).items[i]));
+        if (irq->items[0] == parent) {
+            return irq;
+        }
+    }
+    return NULL;
 }
 
 void IRAM_ATTR mp_irq_queue_interrupt(void (* handler)(void *), void *arg) {

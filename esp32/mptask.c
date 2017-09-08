@@ -13,7 +13,7 @@
 #include <string.h>
 #include <ctype.h>
 
-#include "heap_alloc_caps.h"
+#include "esp_heap_caps.h"
 #include "sdkconfig.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
@@ -73,11 +73,12 @@
 /******************************************************************************
  DECLARE EXTERNAL FUNCTIONS
  ******************************************************************************/
+extern void modpycom_init0(void);
 
 /******************************************************************************
  DECLARE PRIVATE CONSTANTS
  ******************************************************************************/
-#define GC_POOL_SIZE_BYTES                                          (72 * 1024)
+#define GC_POOL_SIZE_BYTES                                          (67 * 1024)
 
 /******************************************************************************
  DECLARE PRIVATE FUNCTIONS
@@ -87,7 +88,7 @@ STATIC void mptask_init_sflash_filesystem (void);
 #if defined(LOPY) || defined(SIPY)
 STATIC void mptask_update_lpwan_mac_address (void);
 #endif
-STATIC void mptask_enter_ap_mode (void);
+STATIC void mptask_enable_wifi_ap (void);
 STATIC void mptask_create_main_py (void);
 
 /******************************************************************************
@@ -111,11 +112,15 @@ void TASK_Micropython (void *pvParameters) {
     // initialize the garbage collector with the top of our stack
     volatile uint32_t sp = (uint32_t)get_sp();
     bool soft_reset = false;
+    bool wifi_on_boot;
 
     // init the antenna select switch here
     antenna_init0();
     config_init0();
-    rtc_init0();
+    mpsleep_init0();
+    if (mpsleep_get_reset_cause() != MPSLEEP_DEEPSLEEP_RESET) {
+        rtc_init0();
+    }
 
     // initialization that must not be repeted after a soft reset
     mptask_preinit();
@@ -139,9 +144,11 @@ void TASK_Micropython (void *pvParameters) {
     alarm_preinit();
     pin_preinit();
 
+    wifi_on_boot = config_get_wifi_on_boot();
+
 soft_reset:
 
-    // Thread init
+    // thread init
 #if MICROPY_PY_THREAD
     mp_thread_init();
 #endif
@@ -158,7 +165,6 @@ soft_reset:
     // execute all basic initializations
     pin_init0();    // always before the rest of the peripherals
     mpexception_init0();
-    mpsleep_init0();
 #if MICROPY_PY_THREAD
     mp_irq_init0();
 #endif
@@ -171,6 +177,7 @@ soft_reset:
     mod_network_init0();
     modbt_init0();
     machtimer_init0();
+    modpycom_init0();
     bool safeboot = false;
     boot_info_t boot_info;
     uint32_t boot_info_offset;
@@ -178,7 +185,9 @@ soft_reset:
         safeboot = boot_info.safeboot;
     }
     if (!soft_reset) {
-        mptask_enter_ap_mode();
+        if (wifi_on_boot) {
+            mptask_enable_wifi_ap();
+        }
         // these ones are special because they need uPy running and they launch tasks
 #if defined(LOPY)
         modlora_init0();
@@ -186,10 +195,6 @@ soft_reset:
         modsigfox_init0();
 #endif
     }
-
-    // FIXME!!
-    extern wlan_obj_t wlan_obj;
-    mod_network_register_nic(&wlan_obj);
 
     // initialize the serial flash file system
     mptask_init_sflash_filesystem();
@@ -214,7 +219,9 @@ soft_reset:
     MP_STATE_PORT(machine_config_main) = MP_OBJ_NULL;
 
     // enable telnet and ftp
-    servers_start();
+    if (wifi_on_boot) {
+        servers_start();
+    }
 
     pyexec_frozen_module("_boot.py");
 
@@ -269,6 +276,7 @@ soft_reset_exit:
     machtimer_deinit();
 #if MICROPY_PY_THREAD
     mp_irq_kill();
+    mp_thread_deinit();
 #endif
     mpsleep_signal_soft_reset();
     mp_printf(&mp_plat_print, "PYB: soft reboot\n");
@@ -380,10 +388,10 @@ STATIC void mptask_update_lpwan_mac_address (void) {
 }
 #endif
 
-STATIC void mptask_enter_ap_mode (void) {
-    wlan_setup (WIFI_MODE_AP, DEFAULT_AP_SSID, strlen(DEFAULT_AP_SSID), WIFI_AUTH_WPA2_PSK,
-                DEFAULT_AP_PASSWORD, strlen(DEFAULT_AP_PASSWORD),
+STATIC void mptask_enable_wifi_ap (void) {
+    wlan_setup (WIFI_MODE_AP, DEFAULT_AP_SSID, WIFI_AUTH_WPA2_PSK, DEFAULT_AP_PASSWORD,
                 DEFAULT_AP_CHANNEL, ANTENNA_TYPE_INTERNAL, true);
+    mod_network_register_nic(&wlan_obj);
 }
 
 STATIC void mptask_create_main_py (void) {

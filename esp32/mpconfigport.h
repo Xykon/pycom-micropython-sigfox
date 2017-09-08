@@ -9,6 +9,33 @@
  * https://www.pycom.io/opensource/licensing
  */
 
+/*
+ * This file is part of the Micro Python project, http://micropython.org/
+ *
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2013, 2014 Damien P. George
+ * Copyright (c) 2015 Daniel Campora
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
 #ifndef __INCLUDED_MPCONFIGPORT_H
 #define __INCLUDED_MPCONFIGPORT_H
 
@@ -78,6 +105,7 @@
 #define MICROPY_PY_SYS_EXC_INFO                     (1)
 #define MICROPY_MODULE_FROZEN_STR                   (0)
 #define MICROPY_MODULE_FROZEN_MPY                   (1)
+#define MICROPY_PERSISTENT_CODE_LOAD                (1)
 #define MICROPY_QSTR_EXTRA_POOL                     mp_qstr_frozen_const_pool
 #define MICROPY_PY_FRAMEBUF                         (1)
 
@@ -176,8 +204,8 @@ extern const struct _mp_obj_module_t mp_module_ussl;
 
 #include "xtensa/xtruntime.h"                       // for the critical section routines
 
-#define MICROPY_BEGIN_ATOMIC_SECTION()              XTOS_DISABLE_ALL_INTERRUPTS
-#define MICROPY_END_ATOMIC_SECTION(state)           XTOS_RESTORE_INTLEVEL(state)
+#define MICROPY_BEGIN_ATOMIC_SECTION()              portENTER_CRITICAL_NESTED()
+#define MICROPY_END_ATOMIC_SECTION(state)           portEXIT_CRITICAL_NESTED(state)
 
 #define MICROPY_PORT_ROOT_POINTERS \
     const char *readline_hist[8];                               \
@@ -208,9 +236,6 @@ extern const struct _mp_obj_module_t mp_module_ussl;
 #define DEFAULT_AP_CHANNEL                                      (6)
 
 #define _assert(expr)   ((expr) ? (void)0 : __assert_func(__FILE__, __LINE__, __func__, #expr))
-
-#define MICROPY_HW_ANTENNA_DIVERSITY                            (1)
-#define MICROPY_HW_ANTENNA_DIVERSITY_PIN_NUM                    (16)
 
 #include "mpconfigboard.h"
 

@@ -25,8 +25,10 @@ APP_INC += -I$(ESP_IDF_COMP_PATH)/mbedtls/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/mbedtls/port/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/driver/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/driver/include/driver
+APP_INC += -I$(ESP_IDF_COMP_PATH)/heap/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/esp32
 APP_INC += -I$(ESP_IDF_COMP_PATH)/esp32/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/soc/esp32/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/expat/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/freertos/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/json/include
@@ -128,6 +130,7 @@ APP_MODS_SRC_C = $(addprefix mods/,\
 	modussl.c \
 	modbt.c \
 	modled.c \
+	machwdt.c \
 	)
 
 APP_MODS_LORA_SRC_C = $(addprefix mods/,\
@@ -227,6 +230,7 @@ BOOT_SRC_C = $(addprefix bootloader/,\
 	bootmgr.c \
 	mperror.c \
 	gpio.c \
+	flash_qio_mode.c \
 	)
 
 SFX_OBJ =
@@ -259,7 +263,7 @@ endif
 # SRC_QSTR
 SRC_QSTR_AUTO_DEPS +=
 
-BOOT_LDFLAGS = $(LDFLAGS) -T esp32.bootloader.ld -T esp32.rom.ld -T esp32.peripherals.ld
+BOOT_LDFLAGS = $(LDFLAGS) -T esp32.bootloader.ld -T esp32.rom.ld -T esp32.peripherals.ld -T esp32.bootloader.rom.ld
 
 # add the application linker script(s)
 APP_LDFLAGS += $(LDFLAGS) -T esp32_out.ld -T esp32.common.ld -T esp32.rom.ld -T esp32.peripherals.ld
@@ -293,6 +297,7 @@ SHELL    = bash
 APP_SIGN = tools/appsign.sh
 
 BOOT_BIN = $(BUILD)/bootloader/bootloader.bin
+
 ifeq ($(BOARD), LOPY)
     APP_BIN = $(BUILD)/lopy_$(LORA_FREQ).bin
 else
@@ -309,12 +314,12 @@ PART_BIN = $(BUILD)/lib/partitions.bin
 ESPPORT ?= /dev/ttyUSB0
 ESPBAUD ?= 921600
 
-FLASH_SIZE = 4MB
-
-ESPFLASHMODE = qio
+FLASH_SIZE = detect
 ESPFLASHFREQ = 40m
+ESPFLASHMODE = dio
+
 ESPTOOLPY = $(PYTHON) $(IDF_PATH)/components/esptool_py/esptool/esptool.py --chip esp32
-ESPTOOLPY_SERIAL = $(ESPTOOLPY) --port $(ESPPORT) --baud $(ESPBAUD)
+ESPTOOLPY_SERIAL = $(ESPTOOLPY) --port $(ESPPORT) --baud $(ESPBAUD) --before default_reset --after hard_reset
 
 ESPTOOLPY_WRITE_FLASH  = $(ESPTOOLPY_SERIAL) write_flash -z --flash_mode $(ESPFLASHMODE) --flash_freq $(ESPFLASHFREQ) --flash_size $(FLASH_SIZE)
 ESPTOOLPY_ERASE_FLASH  = $(ESPTOOLPY_SERIAL) erase_flash
@@ -343,7 +348,7 @@ $(BUILD)/bootloader/bootloader.elf: $(BUILD)/bootloader/bootloader.a
 
 $(BOOT_BIN): $(BUILD)/bootloader/bootloader.elf
 	$(ECHO) "IMAGE $@"
-	$(Q) $(ESPTOOLPY) elf2image --flash_mode $(ESPFLASHMODE) --flash_freq $(ESPFLASHFREQ) --flash_size $(FLASH_SIZE) -o $@ $<
+	$(Q) $(ESPTOOLPY) elf2image --flash_mode $(ESPFLASHMODE) --flash_freq $(ESPFLASHFREQ) -o $@ $<
 else
 
 $(BUILD)/application.a: $(OBJ)

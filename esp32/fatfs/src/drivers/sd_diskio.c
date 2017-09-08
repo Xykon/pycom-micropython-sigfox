@@ -15,7 +15,7 @@
 #include "driver/sdmmc_defs.h"
 #include "sdmmc_cmd.h"
 #include "esp_log.h"
-#include "esp_heap_alloc_caps.h"
+#include "esp_heap_caps.h"
 #include "diskio.h"
 #include "sd_diskio.h"
 #include "stdcmd.h"
@@ -73,6 +73,7 @@ DSTATUS sd_disk_init (void) {
     } else {
         sd_card_status = STA_NOINIT;
     }
+
     return sd_card_status;
 }
 

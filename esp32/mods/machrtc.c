@@ -20,15 +20,14 @@
 #include "esp_system.h"
 #include "mpexception.h"
 #include "machrtc.h"
+#include "soc/rtc.h"
+#include "esp_clk.h"
 
-// next functions are from the IDF
-extern uint64_t get_time_since_boot();
-extern void rtc_calibrate_timer(int32_t adjust_value);
-extern int32_t rtc_get_timer_calibration(void);
-
-#define MAX_CAL_VAL ((1 << 27) - 1)
 
 uint32_t sntp_update_period = 3600000; // in ms
+
+#define RTC_SOURCE_INTERNAL_RC                  RTC_SLOW_FREQ_RTC
+#define RTC_SOURCE_EXTERNAL_XTAL                RTC_SLOW_FREQ_32K_XTAL
 
 /******************************************************************************
  DECLARE PRIVATE DATA
@@ -36,9 +35,11 @@ uint32_t sntp_update_period = 3600000; // in ms
 
 typedef struct _mach_rtc_obj_t {
     mp_obj_base_t base;
-    uint64_t delta_from_epoch_til_boot;
     mp_obj_t sntp_server_name;
+    bool   synced;
 } mach_rtc_obj_t;
+
+static RTC_DATA_ATTR uint64_t delta_from_epoch_til_boot;
 
 STATIC mach_rtc_obj_t mach_rtc_obj;
 const mp_obj_type_t mach_rtc_type;
@@ -48,11 +49,21 @@ void rtc_init0(void) {
 }
 
 void mach_rtc_set_us_since_epoch(uint64_t nowus) {
-    mach_rtc_obj.delta_from_epoch_til_boot = nowus - get_time_since_boot();
+    struct timeval tv;
+
+    // store the packet timestamp
+    gettimeofday(&tv, NULL);
+    delta_from_epoch_til_boot = nowus - (uint64_t)((tv.tv_sec * 1000000ull) + tv.tv_usec);
+}
+
+void mach_rtc_synced (void) {
+    mach_rtc_obj.synced = true;
 }
 
 uint64_t mach_rtc_get_us_since_epoch(void) {
-    return get_time_since_boot() + mach_rtc_obj.delta_from_epoch_til_boot;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)((tv.tv_sec * 1000000ull) + tv.tv_usec) + delta_from_epoch_til_boot;
 };
 
 STATIC uint64_t mach_rtc_datetime_us(const mp_obj_t datetime) {
@@ -92,7 +103,7 @@ STATIC uint64_t mach_rtc_datetime_us(const mp_obj_t datetime) {
     } else {
         tm.tm_hour = mp_obj_get_int(items[3]);
     }
-    useconds += 1000000 * timeutils_seconds_since_epoch(tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    useconds += 1000000ull * timeutils_seconds_since_epoch(tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
     return useconds;
 }
 
@@ -103,16 +114,12 @@ STATIC uint64_t mach_rtc_datetime_us(const mp_obj_t datetime) {
 STATIC void mach_rtc_datetime(const mp_obj_t datetime) {
     uint64_t useconds;
 
-    if (datetime != MP_OBJ_NULL) {
+    if (datetime != mp_const_none) {
         useconds = mach_rtc_datetime_us(datetime);
         mach_rtc_set_us_since_epoch(useconds);
     } else {
         mach_rtc_set_us_since_epoch(0);
     }
-
-    // set WLAN time and date, this is needed to verify certificates
-    // #todo: something similar to the next line is needed
-    // wlan_set_current_time(seconds);
 }
 
 /******************************************************************************/
@@ -120,7 +127,8 @@ STATIC void mach_rtc_datetime(const mp_obj_t datetime) {
 
 STATIC const mp_arg_t mach_rtc_init_args[] = {
     { MP_QSTR_id,                             MP_ARG_INT, {.u_int = 0} },
-    { MP_QSTR_datetime,                       MP_ARG_OBJ, {.u_obj = MP_OBJ_NULL} },
+    { MP_QSTR_datetime,                       MP_ARG_OBJ, {.u_obj = mp_const_none} },
+    { MP_QSTR_source,                         MP_ARG_OBJ, {.u_obj = mp_const_none} },
 };
 STATIC mp_obj_t mach_rtc_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_uint_t n_kw, const mp_obj_t *all_args) {
     // parse args
@@ -139,8 +147,16 @@ STATIC mp_obj_t mach_rtc_make_new(const mp_obj_type_t *type, mp_uint_t n_args, m
     self->base.type = &mach_rtc_type;
 
     // set the time and date
-    if (args[1].u_obj != MP_OBJ_NULL) {
+    if (args[1].u_obj != mp_const_none) {
         mach_rtc_datetime(args[1].u_obj);
+    }
+
+    // change the RTC clock source
+    if (args[2].u_obj != mp_const_none) {
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        select_rtc_slow_clk(mp_obj_get_int(args[2].u_obj));
+        settimeofday(&now, NULL);
     }
 
     // return constant object
@@ -162,7 +178,7 @@ STATIC mp_obj_t mach_rtc_now (mp_obj_t self_in) {
 
     // get the time from the RTC
     useconds = mach_rtc_get_us_since_epoch();
-    timeutils_seconds_since_epoch_to_struct_time(useconds / 1000000, &tm);
+    timeutils_seconds_since_epoch_to_struct_time((useconds / 1000000ull), &tm);
 
     mp_obj_t tuple[8] = {
         mp_obj_new_int(tm.tm_year),
@@ -177,27 +193,6 @@ STATIC mp_obj_t mach_rtc_now (mp_obj_t self_in) {
     return mp_obj_new_tuple(8, tuple);
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(mach_rtc_now_obj, mach_rtc_now);
-
-// calibration(None)
-// calibration(cal)
-// When an integer argument is provided, set the calibration value;
-//      otherwise return calibration value
-mp_obj_t mach_rtc_calibration(mp_uint_t n_args, const mp_obj_t *args) {
-    mp_int_t cal;
-    if (n_args == 2) {
-        cal = mp_obj_get_int(args[1]);
-        if ((cal > MAX_CAL_VAL) || (-cal > MAX_CAL_VAL)) {
-            nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError,
-                            "calibration value out of range"));
-        }
-        rtc_calibrate_timer(cal);
-        return mp_const_none;
-    } else {
-        cal = rtc_get_timer_calibration();
-        return mp_obj_new_int(cal);
-    }
-}
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mach_rtc_calibration_obj, 1, 2, mach_rtc_calibration);
 
 STATIC mp_obj_t mach_rtc_ntp_sync(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
     static const mp_arg_t allowed_args[] = {
@@ -214,11 +209,12 @@ STATIC mp_obj_t mach_rtc_ntp_sync(size_t n_args, const mp_obj_t *pos_args, mp_ma
         nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError, "update period cannot be shorter than 15 s"));
     }
 
+    mach_rtc_obj.synced = false;
     if (sntp_enabled()) {
         sntp_stop();
     }
 
-    if (self->sntp_server_name != mp_const_none) {
+    if (args[0].u_obj != mp_const_none) {
         self->sntp_server_name = args[0].u_obj;
         sntp_setservername(0, (char *) mp_obj_str_get_str(self->sntp_server_name));
         sntp_init();
@@ -228,11 +224,23 @@ STATIC mp_obj_t mach_rtc_ntp_sync(size_t n_args, const mp_obj_t *pos_args, mp_ma
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(mach_rtc_ntp_sync_obj, 1, mach_rtc_ntp_sync);
 
+STATIC mp_obj_t mach_rtc_has_synced (mp_obj_t self_in) {
+    if (mach_rtc_obj.synced) {
+        return mp_const_true;
+    } else {
+        return mp_const_false;
+    }
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(mach_rtc_has_synced_obj, mach_rtc_has_synced);
+
 STATIC const mp_map_elem_t mach_rtc_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_init),                (mp_obj_t)&mach_rtc_init_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_now),                 (mp_obj_t)&mach_rtc_now_obj },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_calibration),         (mp_obj_t)&mach_rtc_calibration_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_ntp_sync),            (mp_obj_t)&mach_rtc_ntp_sync_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_synced),              (mp_obj_t)&mach_rtc_has_synced_obj },
+
+    { MP_OBJ_NEW_QSTR(MP_QSTR_INTERNAL_RC),         MP_OBJ_NEW_SMALL_INT(RTC_SOURCE_INTERNAL_RC) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_XTAL_32KHZ),          MP_OBJ_NEW_SMALL_INT(RTC_SOURCE_EXTERNAL_XTAL) },
 };
 STATIC MP_DEFINE_CONST_DICT(mach_rtc_locals_dict, mach_rtc_locals_dict_table);
 

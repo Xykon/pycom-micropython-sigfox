@@ -246,7 +246,7 @@ bool SX1272IsChannelFree( RadioModems_t modem, uint32_t freq, int16_t rssiThresh
 
     SX1272SetOpMode( RF_OPMODE_RECEIVER );
 
-    DelayMs( 1 );
+    DelayMs( 2 );
 
     rssi = SX1272ReadRssi( modem );
 
@@ -837,17 +837,21 @@ int16_t SX1272ReadRssi( RadioModems_t modem )
 
 void SX1272Reset( void )
 {
-    // Set RESET pin to 1
-    GpioInit( &SX1272.Reset, RADIO_RESET, PIN_OUTPUT, PIN_PUSH_PULL, PIN_NO_PULL, 1 );
+    if (micropy_lpwan_use_reset_pin) {
+        // Set RESET pin to 1
+        GpioInit( &SX1272.Reset, RADIO_RESET, PIN_OUTPUT, PIN_PUSH_PULL, PIN_NO_PULL, 1 );
 
-    // Wait 1 ms
-    DelayMs( 1 );
+        // Wait 2 ms
+        DelayMs( 2 );
 
-    // Configure RESET as input
-    GpioInit( &SX1272.Reset, RADIO_RESET, PIN_INPUT, PIN_PUSH_PULL, PIN_NO_PULL, 1 );
+        // Configure RESET as input
+        GpioInit( &SX1272.Reset, RADIO_RESET, PIN_INPUT, PIN_PUSH_PULL, PIN_NO_PULL, 1 );
 
-    // Wait 6 ms
-    DelayMs( 6 );
+        // Wait 6 ms
+        DelayMs( 6 );
+    } else {
+        DelayMs( 1 );
+    }
 }
 
 IRAM_ATTR void SX1272SetOpMode( uint8_t opMode )
@@ -1035,7 +1039,7 @@ static IRAM_ATTR void SX1272OnDioIrq (void) {
     }
 }
 
-extern uint64_t get_time_since_boot();
+extern uint64_t system_get_rtc_time(void);
 
 IRAM_ATTR void SX1272OnDio0Irq( void )
 {
@@ -1054,7 +1058,7 @@ IRAM_ATTR void SX1272OnDio0Irq( void )
                     int8_t snr = 0;
 
                     // Store the packet timestamp
-                    SX1272.Settings.LoRaPacketHandler.TimeStamp = (uint32_t)get_time_since_boot();
+                    SX1272.Settings.LoRaPacketHandler.TimeStamp = system_get_rtc_time();
 
                     // Clear Irq
                     SX1272Write( REG_LR_IRQFLAGS, RFLR_IRQFLAGS_RXDONE );
