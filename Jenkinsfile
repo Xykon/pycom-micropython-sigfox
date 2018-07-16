@@ -1,5 +1,5 @@
 def buildVersion
-def boards_to_build = ["WiPy", "LoPy", "SiPy", "GPy", "FiPy", "LoPy4"]
+def boards_to_build = ["GPy", "FiPy"]
 def boards_to_test = ["Pycom_Expansion3_Py00ec5f", "Pycom_Expansion3_Py9f8bf5"]
 
 node {
@@ -37,23 +37,6 @@ node {
     stash includes: 'tools/**', name: 'tools'
     stash includes: 'esp32/tools/**', name: 'esp32Tools'
 }
-
-stage ('Flash') {
-    def parallelFlash = [:]
-    for (board in boards_to_test) {
-        parallelFlash[board] = flashBuild(board)
-    }
-    parallel parallelFlash
-}
-
-stage ('Test'){
-    def parallelTests = [:]
-    for (board in boards_to_test) {
-        parallelTests[board] = testBuild(board)
-    }
-    parallel parallelTests
-}
-
 
 def boardBuild(name) {
     def name_u = name.toUpperCase()
