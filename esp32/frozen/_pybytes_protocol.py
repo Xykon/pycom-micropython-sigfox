@@ -19,8 +19,10 @@ try:
     from OTA import WiFiOTA
 except:
     from _OTA import WiFiOTA
-
-from flash_control_OTA import FCOTA
+try:
+    from flash_control_OTA import FCOTA
+except:
+    from _flash_control_OTA import FCOTA
 
 import os
 import _thread
