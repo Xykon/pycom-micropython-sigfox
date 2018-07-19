@@ -378,7 +378,11 @@ int pyexec_friendly_repl(void) {
 #endif
 
 friendly_repl_reset:
+#if defined(PYBYTES_VERSION_NUMBER)
+    mp_hal_stdout_tx_str("Pycom MicroPython " SW_VERSION_NUMBER " with Pybytes " PYBYTES_VERSION_NUMBER " [" MICROPY_GIT_TAG "] on " MICROPY_BUILD_DATE "; " MICROPY_HW_BOARD_NAME " with " MICROPY_HW_MCU_NAME "\r\n");
+#else
     mp_hal_stdout_tx_str("Pycom MicroPython " SW_VERSION_NUMBER " [" MICROPY_GIT_TAG "] on " MICROPY_BUILD_DATE "; " MICROPY_HW_BOARD_NAME " with " MICROPY_HW_MCU_NAME "\r\n");
+#endif
     mp_hal_stdout_tx_str("Type \"help()\" for more information.\r\n");
 
     // to test ctrl-C
