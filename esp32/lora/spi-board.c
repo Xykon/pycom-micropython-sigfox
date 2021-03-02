@@ -79,10 +79,10 @@ void SpiInit( Spi_t *obj, PinNames mosi, PinNames miso, PinNames sclk, PinNames 
     obj->Spi = (void *)SPIDEV;
 
     // this is SpiNum_SPI3
-    SET_PERI_REG_MASK(DPORT_PERIP_CLK_EN_REG,DPORT_SPI_CLK_EN_2);
-    CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG,DPORT_SPI_RST_2);
+    DPORT_SET_PERI_REG_MASK(DPORT_PERIP_CLK_EN_REG,DPORT_SPI_CLK_EN_2);
+    DPORT_CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG,DPORT_SPI_RST_2);
 
-#ifdef SIPY
+#if defined (SIPY)
     // configure the SPI port
     spi_attr_t spi_attr = {.mode = SpiMode_Master, .subMode = SpiSubMode_0, .speed = SpiSpeed_8MHz,
                            .bitOrder = SpiBitOrder_MSBFirst, .halfMode = SpiWorkMode_Full};
@@ -114,7 +114,7 @@ void SpiInit( Spi_t *obj, PinNames mosi, PinNames miso, PinNames sclk, PinNames 
     pin_config(obj->Mosi.pin_obj, -1, VSPID_OUT_IDX, GPIO_MODE_OUTPUT, PIN_NO_PULL, 0);
     pin_config(obj->Sclk.pin_obj, -1, VSPICLK_OUT_IDX, GPIO_MODE_OUTPUT, PIN_NO_PULL, 0);
 
-#ifdef SIPY
+#if defined (SIPY)
     // configure the chip select pin
     obj->Nss.pin_obj = gpio_board_map[nss];
     pin_config(obj->Nss.pin_obj, -1, -1, GPIO_MODE_OUTPUT, PIN_PULL_UP, 1);
@@ -162,9 +162,16 @@ void SpiFrequency( Spi_t *obj, uint32_t hz ) {
  * \param [IN] outData Byte to be sent
  * \retval inData      Received byte.
  */
-#if defined(LOPY)
+#if defined(LOPY) || defined(LOPY4) || defined(FIPY)
 IRAM_ATTR uint16_t SpiInOut(Spi_t *obj, uint16_t outData) {
     uint32_t spiNum = (uint32_t)obj->Spi;
+
+#if defined(FIPY) || defined(LOPY4)
+    // set data send buffer length (1 byte)
+    SET_PERI_REG_BITS(SPI_MOSI_DLEN_REG(spiNum), SPI_USR_MOSI_DBITLEN, 7, SPI_USR_MOSI_DBITLEN_S);
+    SET_PERI_REG_BITS(SPI_MISO_DLEN_REG(spiNum), SPI_USR_MISO_DBITLEN, 7, SPI_USR_MISO_DBITLEN_S);
+#endif
+
     // load the send buffer
     WRITE_PERI_REG(SPI_W0_REG(spiNum), outData);
     // start to send data
@@ -189,7 +196,9 @@ IRAM_ATTR uint8_t SpiInOut(uint32_t spiNum, uint32_t outData) {
     // read data out
     return READ_PERI_REG(SPI_W0_REG(spiNum));
 }
+#endif
 
+#if defined(SIPY) || defined(LOPY4) || defined(FIPY)
 /*!
  * \brief Sends outData
  *

@@ -2,7 +2,7 @@ MicroPython port for the ESP32 based boards from Pycom
 ======================================================
 
 In order to build this project, a copy of the Espressif IDF is required and it's
-path must be specified via the ESP_IDF_PATH variable. See the Makefile for details.
+path must be specified via the IDF_PATH variable. See the Makefile for details.
 
 The modified Espressif IDF that we use to build this port can be found in:
 https://github.com/pycom/pycom-esp-idf
@@ -19,11 +19,11 @@ After that, build the ESP32 port for one of Pycom boards (first the bootloader, 
 
     $ cd ../esp32
     $ make BOARD=LOPY -j5 TARGET=boot
-    $ make BOARD=LOPY -j5 LORA_BAND=USE_BAND_868 TARGET=app
+    $ make BOARD=LOPY -j5 TARGET=app
 
 Flash the board (connect P2 to GND and reset before starting):
 
-    $ make BOARD=LOPY -j5 LORA_BAND=USE_BAND_868 flash
+    $ make BOARD=LOPY -j5 flash
 
 Using frozen modules
 --------------------

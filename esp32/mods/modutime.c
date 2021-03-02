@@ -153,28 +153,33 @@ STATIC mp_obj_t time_sleep_us(mp_obj_t arg) {
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(time_sleep_us_obj, time_sleep_us);
 
 STATIC mp_obj_t time_ticks_ms(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return mp_obj_new_int_from_uint(((tv.tv_sec * 1000) + tv.tv_usec / 1000));
+    return mp_obj_new_int_from_uint(mp_hal_ticks_ms());
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(time_ticks_ms_obj, time_ticks_ms);
 
 STATIC mp_obj_t time_ticks_us(void) {
-    return mp_obj_new_int_from_uint(system_get_rtc_time());
+    return mp_obj_new_int_from_uint(mp_hal_ticks_us());
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(time_ticks_us_obj, time_ticks_us);
 
 STATIC mp_obj_t time_ticks_cpu(void) {
-   return mp_obj_new_int_from_uint(get_timer_counter_value());
+   return mp_obj_new_int_from_uint(mp_hal_ticks_us_non_blocking());
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(time_ticks_cpu_obj, time_ticks_cpu);
 
 STATIC mp_obj_t time_ticks_diff(mp_obj_t start_in, mp_obj_t end_in) {
-   uint32_t start = mp_obj_get_int(start_in);
-   uint32_t end = mp_obj_get_int(end_in);
-   return mp_obj_new_int_from_uint((end - start));
+    int32_t start = mp_obj_get_int_truncated(start_in);
+    int32_t end = mp_obj_get_int_truncated(end_in);
+    return mp_obj_new_int(end - start);
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(time_ticks_diff_obj, time_ticks_diff);
+
+STATIC mp_obj_t time_ticks_add(mp_obj_t start_in, mp_obj_t delta_in) {
+    uint32_t start = mp_obj_get_int_truncated(start_in);
+    uint32_t delta = mp_obj_get_int_truncated(delta_in);
+    return mp_obj_new_int_from_uint(start + delta);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_2(time_ticks_add_obj, time_ticks_add);
 
 /// \function time()
 /// Returns the number of seconds, as an integer, since 1/1/1970.
@@ -208,6 +213,7 @@ STATIC const mp_map_elem_t time_module_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_ticks_ms),            (mp_obj_t)&time_ticks_ms_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_ticks_us),            (mp_obj_t)&time_ticks_us_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_ticks_cpu),           (mp_obj_t)&time_ticks_cpu_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_ticks_add),           (mp_obj_t)&time_ticks_add_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_ticks_diff),          (mp_obj_t)&time_ticks_diff_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_time),                (mp_obj_t)&time_time_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_timezone),            (mp_obj_t)&time_timezone_obj },

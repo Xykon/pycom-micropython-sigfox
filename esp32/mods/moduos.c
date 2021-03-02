@@ -224,12 +224,13 @@ STATIC void unmount (os_fs_mount_t *mount_obj) {
 
 STATIC const qstr os_uname_info_fields[] = {
     MP_QSTR_sysname, MP_QSTR_nodename,
-    MP_QSTR_release, MP_QSTR_version,
-    MP_QSTR_machine,
-#if defined(LOPY)
-	MP_QSTR_lorawan
-#elif defined(SIPY)
-	MP_QSTR_sigfox
+    MP_QSTR_release, MP_QSTR_version
+    ,MP_QSTR_machine
+#if defined(LOPY) || defined(LOPY4) || defined(FIPY)
+    ,MP_QSTR_lorawan
+#endif
+#if defined(SIPY) || defined(FIPY) || defined(LOPY4)
+    ,MP_QSTR_sigfox
 #endif
 };
 STATIC const MP_DEFINE_STR_OBJ(os_uname_info_sysname_obj, MICROPY_PY_SYS_PLATFORM);
@@ -237,26 +238,34 @@ STATIC const MP_DEFINE_STR_OBJ(os_uname_info_nodename_obj, MICROPY_PY_SYS_PLATFO
 STATIC const MP_DEFINE_STR_OBJ(os_uname_info_release_obj, SW_VERSION_NUMBER);
 STATIC const MP_DEFINE_STR_OBJ(os_uname_info_version_obj, MICROPY_GIT_TAG " on " MICROPY_BUILD_DATE);
 STATIC const MP_DEFINE_STR_OBJ(os_uname_info_machine_obj, MICROPY_HW_BOARD_NAME " with " MICROPY_HW_MCU_NAME);
-#if defined(LOPY)
-STATIC const MP_DEFINE_STR_OBJ(os_uname_info_lpwan_obj, LORAWAN_VERSION_NUMBER);
-#elif defined(SIPY)
-STATIC const MP_DEFINE_STR_OBJ(os_uname_info_lpwan_obj, SIGFOX_VERSION_NUMBER);
+#if defined(LOPY) || defined(LOPY4) || defined(FIPY)
+STATIC const MP_DEFINE_STR_OBJ(os_uname_info_lorawan_obj, LORAWAN_VERSION_NUMBER);
+#endif
+#if defined(SIPY) || defined (LOPY4) || defined (FIPY)
+STATIC const MP_DEFINE_STR_OBJ(os_uname_info_sigfox_obj, SIGFOX_VERSION_NUMBER);
 #endif
 STATIC MP_DEFINE_ATTRTUPLE(
     os_uname_info_obj
     ,os_uname_info_fields
+#if defined(FIPY) || defined (LOPY4)
+    ,7
+#else
 #if defined(LOPY) || defined(SIPY)
     ,6
-#else
+    #else
     ,5
+    #endif
 #endif
     ,(mp_obj_t)&os_uname_info_sysname_obj
     ,(mp_obj_t)&os_uname_info_nodename_obj
     ,(mp_obj_t)&os_uname_info_release_obj
     ,(mp_obj_t)&os_uname_info_version_obj
     ,(mp_obj_t)&os_uname_info_machine_obj
-#if defined(LOPY) || defined(SIPY)
-    ,(mp_obj_t)&os_uname_info_lpwan_obj
+#if defined(LOPY) || defined(LOPY4) || defined(FIPY)
+    ,(mp_obj_t)&os_uname_info_lorawan_obj
+#endif
+#if defined(SIPY) || defined (LOPY4) || defined(FIPY)
+    ,(mp_obj_t)&os_uname_info_sigfox_obj
 #endif
 );
 
@@ -441,6 +450,27 @@ STATIC mp_obj_t os_stat(mp_obj_t path_in) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(os_stat_obj, os_stat);
 
+STATIC mp_obj_t os_getfree(mp_obj_t path_in) {
+    const char *path = mp_obj_str_get_str(path_in);
+    FATFS *fs;
+    DWORD nclst;
+
+    FRESULT res = f_getfree(path, &nclst, &fs);
+    if (FR_OK != res) {
+        mp_raise_OSError(fresult_to_errno_table[res]);
+    }
+
+    uint64_t free_space = ((uint64_t)fs->csize * nclst)
+#if _MAX_SS != _MIN_SS
+    * fs->ssize;
+#else
+    * _MIN_SS;
+#endif
+
+    return mp_obj_new_int_from_ull(free_space / 1024);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(os_getfree_obj, os_getfree);
+
 STATIC mp_obj_t os_sync(void) {
     sflash_disk_flush();
     return mp_const_none;
@@ -600,6 +630,7 @@ STATIC const mp_map_elem_t os_module_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_unlink),          (mp_obj_t)&os_remove_obj },     // unlink aliases to remove
     { MP_OBJ_NEW_QSTR(MP_QSTR_sync),            (mp_obj_t)&os_sync_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_urandom),         (mp_obj_t)&os_urandom_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_getfree),         (mp_obj_t)&os_getfree_obj },
 
     // MicroPython additions
     { MP_OBJ_NEW_QSTR(MP_QSTR_mount),           (mp_obj_t)&os_mount_obj },

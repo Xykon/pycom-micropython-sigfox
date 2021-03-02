@@ -43,9 +43,14 @@ Maintainer: Miguel Luis and Gregory Cristian
 #include "lora/system/spi.h"
 #include "lora/system/delay.h"
 #include "radio.h"
+#if defined(LOPY) || defined (FIPY)
 #include "sx1272/sx1272.h"
-#include "timer-board.h"
 #include "sx1272-board.h"
+#elif defined(LOPY4)
+#include "sx1276/sx1276.h"
+#include "sx1276-board.h"
+#endif
+#include "timer-board.h"
 #include "utilities.h"
 
 #include "freertos/FreeRTOS.h"
@@ -58,7 +63,7 @@ Maintainer: Miguel Luis and Gregory Cristian
 /*!
  * Board MCU pins definitions
  */
-
+#if defined (LOPY) || defined (LOPY4) || defined (FIPY)
 #define RADIO_RESET                                 micropy_lpwan_reset_pin_index
 
 #define RADIO_MOSI                                  GPIO27
@@ -67,6 +72,7 @@ Maintainer: Miguel Luis and Gregory Cristian
 #define RADIO_NSS                                   micropy_lpwan_ncs_pin_index
 
 #define RADIO_DIO                                   micropy_lpwan_dio_pin_index
+#endif
 
 void BoardInitPeriph( void );
 

@@ -19,7 +19,7 @@
 #define LORA_PAYLOAD_SIZE_MAX                                   (255)
 #define LORA_CMD_QUEUE_SIZE_MAX                                 (2)
 #define LORA_DATA_QUEUE_SIZE_MAX                                (3)
-#define LORA_STACK_SIZE                                         (3072)
+#define LORA_STACK_SIZE                                         (2560)
 #define LORA_TASK_PRIORITY                                      (6)
 
 #define LORA_STATUS_COMPLETED                                   (0x01)
@@ -47,11 +47,24 @@ typedef enum {
     E_LORA_NVS_ELE_NWSKEY,
     E_LORA_NVS_ELE_APPSKEY,
     E_LORA_NVS_ELE_NET_ID,
-    E_LORA_NVS_NUM_KEYS
+    E_LORA_NVS_ELE_ADR_ACKS,
+    E_LORA_NVS_ELE_MAC_PARAMS,
+    E_LORA_NVS_ELE_CHANNELS,
+    E_LORA_NVS_ELE_ACK_REQ,
+    E_LORA_NVS_MAC_NXT_TX,
+    E_LORA_NVS_MAC_CMD_BUF_IDX,
+    E_LORA_NVS_MAC_CMD_BUF_RPT_IDX,
+    E_LORA_NVS_ELE_MAC_BUF,
+    E_LORA_NVS_ELE_MAC_RPT_BUF,
+    E_LORA_NVS_ELE_REGION,
+    E_LORA_NVS_ELE_CHANNELMASK,
+    E_LORA_NVS_ELE_CHANNELMASK_REMAINING,
+    E_LORA_NVS_NUM_KEYS 
 } e_lora_nvs_key_t;
 
 typedef struct {
     uint32_t        frequency;
+    LoRaMacRegion_t region;
     DeviceClass_t   device_class;
     uint8_t         stack_mode;
     uint8_t         preamble;
@@ -84,7 +97,7 @@ typedef struct {
             uint8_t           NwkSKey[16];
             uint8_t           AppSKey[16];
         } abp;
-    };
+    } u;
 } lora_join_cmd_data_t;
 
 typedef struct {

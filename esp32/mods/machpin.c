@@ -53,6 +53,7 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_intr.h"
+#include "driver/rtc_io.h"
 
 #include "gpio.h"
 #include "machpin.h"
@@ -107,7 +108,7 @@ DECLARE PRIVATE DATA
  DEFINE PUBLIC FUNCTIONS
  ******************************************************************************/
 void pin_preinit(void) {
-    gpio_isr_register(machpin_intr_process, NULL, 0, NULL);
+    gpio_isr_register(machpin_intr_process, NULL, ESP_INTR_FLAG_IRAM, NULL);
 }
 
 void pin_init0(void) {
@@ -116,6 +117,21 @@ void pin_init0(void) {
     for (uint i = 0; i < named_map->used - 1; i++) {
         pin_obj_t *self = (pin_obj_t *)named_map->table[i].value;
         if (self != &PIN_MODULE_P1) {  // temporal while we remove all the IDF logs
+        #ifdef DEBUG
+            if (self == &PIN_MODULE_P4 || self == &PIN_MODULE_P9 || self == &PIN_MODULE_P10 || self == &PIN_MODULE_P23) {
+               continue;
+            }
+        #endif
+        
+        #if defined (FIPY)
+            if (self == &PIN_MODULE_P17 || self == &PIN_MODULE_P18 || self == &PIN_MODULE_P19 || self == &PIN_MODULE_P20) {
+               continue;
+            }
+        #elif defined (GPY)
+            if (self == &PIN_MODULE_P5 || self == &PIN_MODULE_P6 || self == &PIN_MODULE_P7) {
+               continue;
+            }
+        #endif
             pin_config(self, -1, -1, GPIO_MODE_INPUT, MACHPIN_PULL_DOWN, 0);
         }
     }
@@ -161,9 +177,6 @@ void pin_config (pin_obj_t *self, int af_in, int af_out, uint mode, uint pull, i
     self->irq_trigger = GPIO_INTR_DISABLE;
 
     pin_obj_configure ((const pin_obj_t *)self);
-
-//    // register it with the sleep module
-//    pyb_sleep_add ((const mp_obj_t)self, (WakeUpCB_t)pin_obj_configure);
 }
 
 void pin_irq_enable (mp_obj_t self_in) {
@@ -188,6 +201,7 @@ void pin_deassign (pin_obj_t *self) {
         gpio_matrix_in(self->af_in, self->value ? MACHPIN_SIMPLE_IN_HIGH : MACHPIN_SIMPLE_IN_LOW, false);
     }
     if (self->af_out >= 0) {
+        pin_set_value(self);
         gpio_matrix_out(self->pin_number, MACHPIN_SIMPLE_OUTPUT, false, false);
     }
     self->af_in = -1;
@@ -280,7 +294,7 @@ STATIC void pin_validate_pull (uint pull) {
 STATIC void pin_interrupt_queue_handler(void *arg) {
     // this function will be called by the interrupt thread
     pin_obj_t *pin = arg;
-    if (pin->handler != mp_const_none) {
+    if (pin->handler && pin->handler != mp_const_none) {
         mp_call_function_1(pin->handler, pin->handler_arg);
     }
 }
@@ -538,12 +552,20 @@ STATIC mp_obj_t pin_hold(mp_uint_t n_args, const mp_obj_t *args) {
     } else {
         self->hold = mp_obj_is_true(args[1]);
         if (self->hold == true) {
-            gpio_pad_hold(self->pin_number);
+            if (ESP_OK != rtc_gpio_hold_en(self->pin_number)) {
+                goto error;
+            }
         } else {
-            gpio_pad_unhold(self->pin_number);
+            if (ESP_OK != rtc_gpio_hold_dis(self->pin_number)) {
+                goto error;
+            }
         }
     }
     return mp_const_none;
+
+error:
+    mp_raise_msg(&mp_type_OSError, "the hold functionality is only available for GPIO pins in the RTC domain");
+
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(pin_hold_obj, 1, 2, pin_hold);
 

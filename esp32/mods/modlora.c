@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "py/mpconfig.h"
 #include "py/mpstate.h"
 #include "py/obj.h"
 #include "py/nlr.h"
@@ -45,29 +46,18 @@
 #include "freertos/event_groups.h"
 
 #include "lora/mac/LoRaMacTest.h"
+#include "lora/mac/region/Region.h"
+#include "lora/mac/region/RegionAS923.h"
+#include "lora/mac/region/RegionAU915.h"
+#include "lora/mac/region/RegionUS915.h"
+#include "lora/mac/region/RegionUS915-Hybrid.h"
+#include "lora/mac/region/RegionEU868.h"
 
 /******************************************************************************
  DEFINE PRIVATE CONSTANTS
  ******************************************************************************/
-#if defined(USE_BAND_868)
-#define RF_FREQUENCY_MIN                            863000000   // Hz
-#define RF_FREQUENCY_CENTER                         868000000   // Hz
-#define RF_FREQUENCY_MAX                            870000000   // Hz
 #define TX_OUTPUT_POWER_MAX                         20          // dBm
-#define TX_OUTPUT_POWER_DEAFULT                     13          // dBm
 #define TX_OUTPUT_POWER_MIN                         2           // dBm
-#define LORAWAN_MAX_JOIN_DATARATE                   5
-#elif defined(USE_BAND_915) || defined(USE_BAND_915_HYBRID)
-#define RF_FREQUENCY_MIN                            902000000   // Hz
-#define RF_FREQUENCY_CENTER                         915000000   // Hz
-#define RF_FREQUENCY_MAX                            928000000   // Hz
-#define TX_OUTPUT_POWER_MAX                         20          // dBm
-#define TX_OUTPUT_POWER_DEAFULT                     20          // dBm
-#define TX_OUTPUT_POWER_MIN                         5           // dBm
-#define LORAWAN_MAX_JOIN_DATARATE                   3
-#else
-    #error "Please define a frequency band in the compiler options."
-#endif
 
 #define LORA_FIX_LENGTH_PAYLOAD_ON                  (true)
 #define LORA_FIX_LENGTH_PAYLOAD_OFF                 (false)
@@ -78,22 +68,12 @@
 #define LORA_SPREADING_FACTOR_MIN                   (6)
 #define LORA_SPREADING_FACTOR_MAX                   (12)
 
-#define LORA_CHECK_SOCKET(s)                        if (s->sock_base.sd < 0) {  \
+#define LORA_CHECK_SOCKET(s)                        if (s->sock_base.u.sd < 0) {  \
                                                         *_errno = MP_EBADF;     \
                                                         return -1;              \
                                                     }
 
-#define OVER_THE_AIR_ACTIVATION_DUTYCYCLE           15000  // 15 [s] value in ms
-
-#if defined( USE_BAND_868 )
-#define LC4                                         { 867100000, { ( ( DR_5 << 4 ) | DR_0 ) }, 0 }
-#define LC5                                         { 867300000, { ( ( DR_5 << 4 ) | DR_0 ) }, 0 }
-#define LC6                                         { 867500000, { ( ( DR_5 << 4 ) | DR_0 ) }, 0 }
-#define LC7                                         { 867700000, { ( ( DR_5 << 4 ) | DR_0 ) }, 0 }
-#define LC8                                         { 867900000, { ( ( DR_5 << 4 ) | DR_0 ) }, 0 }
-#define LC9                                         { 868800000, { ( ( DR_7 << 4 ) | DR_7 ) }, 2 }
-#define LC10                                        { 868300000, { ( ( DR_6 << 4 ) | DR_6 ) }, 1 }
-#endif
+#define OVER_THE_AIR_ACTIVATION_DUTYCYCLE           10000  // 10 [s] value in ms
 
 #define DEF_LORAWAN_NETWORK_ID                      0
 #define DEF_LORAWAN_APP_PORT                        2
@@ -176,12 +156,16 @@ typedef struct {
     mp_obj_base_t     base;
     mp_obj_t          handler;
     mp_obj_t          handler_arg;
+    LoRaMacRegion_t   region;
     lora_stack_mode_t stack_mode;
     DeviceClass_t     device_class;
     lora_state_t      state;
     uint32_t          frequency;
     uint32_t          rx_timestamp;
     uint32_t          net_id;
+    uint32_t          tx_time_on_air;
+    uint32_t          tx_counter;
+    uint32_t          tx_frequency;
     int16_t           rssi;
     int8_t            snr;
     uint8_t           sfrx;
@@ -190,21 +174,24 @@ typedef struct {
     uint8_t           bandwidth;
     uint8_t           coding_rate;
     uint8_t           sf;
-    uint8_t           tx_power;
+    int8_t            tx_power;
     uint8_t           pwr_mode;
+
     struct {
-    bool Enabled;
-    bool Running;
-    uint8_t State;
-    bool IsTxConfirmed;
-    uint16_t DownLinkCounter;
-    bool LinkCheck;
-    uint8_t DemodMargin;
-    uint8_t NbGateways;
+        bool Enabled;
+        bool Running;
+        uint8_t State;
+        bool IsTxConfirmed;
+        uint16_t DownLinkCounter;
+        bool LinkCheck;
+        uint8_t DemodMargin;
+        uint8_t NbGateways;
     } ComplianceTest;
+
     uint8_t           activation;
     uint8_t           tx_retries;
     uint8_t           otaa_dr;
+
     union {
         struct {
             // for OTAA
@@ -219,7 +206,8 @@ typedef struct {
             uint8_t           NwkSKey[16];
             uint8_t           AppSKey[16];
         } abp;
-    };
+    } u;
+
     bool              txiq;
     bool              rxiq;
     bool              adr;
@@ -245,15 +233,27 @@ static QueueHandle_t xRxQueue;
 static EventGroupHandle_t LoRaEvents;
 
 static RadioEvents_t RadioEvents;
+static lora_cmd_data_t task_cmd_data;
+static LoRaMacPrimitives_t LoRaMacPrimitives;
+static LoRaMacCallback_t LoRaMacCallbacks;
 
-static volatile lora_obj_t lora_obj;
-static volatile lora_partial_rx_packet_t lora_partial_rx_packet;
-static volatile lora_rx_data_t rx_data_isr;
+static lora_obj_t lora_obj;
+static lora_partial_rx_packet_t lora_partial_rx_packet;
+static lora_rx_data_t rx_data_isr;
 
 static TimerEvent_t TxNextActReqTimer;
 
 static nvs_handle modlora_nvs_handle;
-static const char *modlora_nvs_data_key[E_LORA_NVS_NUM_KEYS] = { "JOINED", "UPLNK", "DWLNK", "DEVADDR", "NWSKEY", "APPSKEY", "NETID" };
+static const char *modlora_nvs_data_key[E_LORA_NVS_NUM_KEYS] = { "JOINED", "UPLNK", "DWLNK", "DEVADDR",
+                                                                 "NWSKEY", "APPSKEY", "NETID", "ADRACK",
+                                                                 "MACPARAMS", "CHANNELS", "SRVACK", "MACNXTTX",
+                                                                 "MACBUFIDX", "MACRPTIDX", "MACBUF", "MACRPTBUF",
+                                                                 "REGION", "CHANMASK", "CHANMASKREM" };
+
+/******************************************************************************
+ DECLARE PUBLIC DATA
+ ******************************************************************************/
+extern TaskHandle_t xLoRaTaskHndl;
 
 /******************************************************************************
  DECLARE PRIVATE FUNCTIONS
@@ -291,6 +291,15 @@ static int lora_socket_bind (mod_network_socket_obj_t *s, byte *ip, mp_uint_t po
 static int lora_socket_setsockopt (mod_network_socket_obj_t *s, mp_uint_t level, mp_uint_t opt, const void *optval, mp_uint_t optlen, int *_errno);
 static int lora_socket_ioctl (mod_network_socket_obj_t *s, mp_uint_t request, mp_uint_t arg, int *_errno);
 
+STATIC mp_obj_t lora_nvram_erase (mp_obj_t self_in);
+
+/******************************************************************************
+ DECLARE PUBLIC DATA
+ ******************************************************************************/
+#if defined(FIPY) || defined(LOPY4)
+SemaphoreHandle_t xLoRaSigfoxSem;
+#endif
+
 /******************************************************************************
  DEFINE PUBLIC FUNCTIONS
  ******************************************************************************/
@@ -298,12 +307,19 @@ void modlora_init0(void) {
     xCmdQueue = xQueueCreate(LORA_CMD_QUEUE_SIZE_MAX, sizeof(lora_cmd_data_t));
     xRxQueue = xQueueCreate(LORA_DATA_QUEUE_SIZE_MAX, sizeof(lora_rx_data_t));
     LoRaEvents = xEventGroupCreate();
+#if defined(FIPY) || defined(LOPY4)
+    xLoRaSigfoxSem = xSemaphoreCreateMutex();
+#endif
 
     if (!lorawan_nvs_open()) {
-        printf("Error opening LoRa NVS namespace!\n");
+        mp_printf(&mp_plat_print, "Error opening LoRa NVS namespace!\n");
     }
 
-    xTaskCreatePinnedToCore(TASK_LoRa, "LoRa", LORA_STACK_SIZE / sizeof(StackType_t), NULL, LORA_TASK_PRIORITY, NULL, 0);
+    // target board initialisation
+    BoardInitMcu();
+    BoardInitPeriph();
+
+    xTaskCreatePinnedToCore(TASK_LoRa, "LoRa", LORA_STACK_SIZE / sizeof(StackType_t), NULL, LORA_TASK_PRIORITY, &xLoRaTaskHndl, 1);
 }
 
 bool modlora_nvs_set_uint(uint32_t key_idx, uint32_t value) {
@@ -321,15 +337,16 @@ bool modlora_nvs_set_blob(uint32_t key_idx, const void *value, uint32_t length) 
 }
 
 bool modlora_nvs_get_uint(uint32_t key_idx, uint32_t *value) {
-    if (ESP_OK == nvs_get_u32(modlora_nvs_handle, modlora_nvs_data_key[key_idx], value)) {
+    esp_err_t err;
+    if (ESP_OK == (err = nvs_get_u32(modlora_nvs_handle, modlora_nvs_data_key[key_idx], value))) {
         return true;
     }
     return false;
 }
 
 bool modlora_nvs_get_blob(uint32_t key_idx, void *value, uint32_t *length) {
-    uint32_t result = nvs_get_blob(modlora_nvs_handle, modlora_nvs_data_key[key_idx], value, length);
-    if (ESP_OK == result) {
+    esp_err_t err;
+    if (ESP_OK == (err = nvs_get_blob(modlora_nvs_handle, modlora_nvs_data_key[key_idx], value, length))) {
         return true;
     }
     return false;
@@ -412,10 +429,16 @@ static int32_t lorawan_send (const byte *buf, uint32_t len, uint32_t timeout_ms,
 static void McpsConfirm (McpsConfirm_t *McpsConfirm) {
     uint32_t status = LORA_STATUS_COMPLETED;
     if (McpsConfirm->Status == LORAMAC_EVENT_INFO_STATUS_OK) {
+        // save the values before calling the event handler
+        lora_obj.sftx = McpsConfirm->Datarate;
+        lora_obj.tx_trials = McpsConfirm->NbRetries;
+        lora_obj.tx_time_on_air = McpsConfirm->TxTimeOnAir;
+        lora_obj.tx_power = McpsConfirm->TxPower;
+        lora_obj.tx_frequency = McpsConfirm->UpLinkFrequency;
+        lora_obj.tx_counter = McpsConfirm->UpLinkCounter;
+
         switch (McpsConfirm->McpsRequest) {
-            case MCPS_UNCONFIRMED:
-                // Check Datarate
-                // Check TxPower
+            case MCPS_UNCONFIRMED: {
                 lora_obj.events |= MODLORA_TX_EVENT;
                 if (lora_obj.trigger & MODLORA_TX_EVENT) {
                     mp_irq_queue_interrupt(lora_callback_handler, (void *)&lora_obj);
@@ -423,12 +446,8 @@ static void McpsConfirm (McpsConfirm_t *McpsConfirm) {
                 lora_obj.state = E_LORA_STATE_IDLE;
                 xEventGroupSetBits(LoRaEvents, status);
                 break;
+            }
             case MCPS_CONFIRMED:
-                // Check Datarate
-                // Check TxPower
-                // Check AckReceived
-                // Check NbRetries
-                lora_obj.sftx = McpsConfirm->Datarate;
                 lora_obj.tx_trials = McpsConfirm->NbRetries;
                 if (McpsConfirm->AckReceived) {
                     lora_obj.events |= MODLORA_TX_EVENT;
@@ -447,15 +466,17 @@ static void McpsConfirm (McpsConfirm_t *McpsConfirm) {
                 break;
         }
     } else {
-        lora_obj.tx_trials = McpsConfirm->NbRetries;
-        lora_obj.state = E_LORA_STATE_IDLE;
         lora_obj.events |= MODLORA_TX_FAILED_EVENT;
         if (lora_obj.trigger & MODLORA_TX_FAILED_EVENT) {
             mp_irq_queue_interrupt(lora_callback_handler, (void *)&lora_obj);
         }
+        lora_obj.state = E_LORA_STATE_IDLE;
         status |= LORA_STATUS_ERROR;
         xEventGroupSetBits(LoRaEvents, status);
     }
+#if defined(FIPY) || defined(LOPY4)
+    xSemaphoreGive(xLoRaSigfoxSem);
+#endif
 }
 
 static void McpsIndication (McpsIndication_t *mcpsIndication) {
@@ -504,7 +525,6 @@ static void McpsIndication (McpsIndication_t *mcpsIndication) {
                 rx_data_isr.len = mcpsIndication->BufferSize;
                 rx_data_isr.port = mcpsIndication->Port;
                 xQueueSend(xRxQueue, (void *)&rx_data_isr, 0);
-
                 lora_obj.events |= MODLORA_RX_EVENT;
                 if (lora_obj.trigger & MODLORA_RX_EVENT) {
                     mp_irq_queue_interrupt(lora_callback_handler, (void *)&lora_obj);
@@ -539,10 +559,9 @@ static void McpsIndication (McpsIndication_t *mcpsIndication) {
                         mibReq.Param.AdrEnable = true;
                         LoRaMacMibSetRequestConfirm( &mibReq );
 
-                    #if defined(USE_BAND_868)
                         // always disable duty cycle limitation during test mode
                         LoRaMacTestSetDutyCycleOn(false);
-                    #endif
+
                         // printf("Compliance enabled\n");
                     }
                 } else {
@@ -558,9 +577,7 @@ static void McpsIndication (McpsIndication_t *mcpsIndication) {
                         mibReq.Type = MIB_ADR;
                         mibReq.Param.AdrEnable = lora_obj.adr;
                         LoRaMacMibSetRequestConfirm(&mibReq);
-                    #if defined( USE_BAND_868 )
                         LoRaMacTestSetDutyCycleOn(true);
-                    #endif
                         // printf("Compliance disabled\n");
                         break;
                     case 1: // (iii, iv)
@@ -630,6 +647,9 @@ static void MlmeConfirm (MlmeConfirm_t *MlmeConfirm) {
                 break;
         }
     }
+#if defined(FIPY) || defined(LOPY4)
+    xSemaphoreGive(xLoRaSigfoxSem);
+#endif
 }
 
 static void OnTxNextActReqTimerEvent(void) {
@@ -652,21 +672,15 @@ static void OnTxNextActReqTimerEvent(void) {
 }
 
 static void TASK_LoRa (void *pvParameters) {
-    lora_cmd_data_t cmd_data;
+    MibRequestConfirm_t mibReq;
+    MlmeReq_t mlmeReq;
+    McpsReq_t mcpsReq;
+
     lora_obj.state = E_LORA_STATE_NOINIT;
     lora_obj.pwr_mode = E_LORA_MODE_ALWAYS_ON;
 
-    LoRaMacPrimitives_t LoRaMacPrimitives;
-    LoRaMacCallback_t LoRaMacCallbacks;
-    MibRequestConfirm_t mibReq;
-    MlmeReq_t mlmeReq;
-
-    // target board initialisation
-    BoardInitMcu();
-    BoardInitPeriph();
-
     for ( ; ; ) {
-        vTaskDelay (1 / portTICK_PERIOD_MS);
+        vTaskDelay (2 / portTICK_PERIOD_MS);
 
         switch (lora_obj.state) {
         case E_LORA_STATE_NOINIT:
@@ -674,54 +688,51 @@ static void TASK_LoRa (void *pvParameters) {
         case E_LORA_STATE_RX:
         case E_LORA_STATE_SLEEP:
             // receive from the command queue and act accordingly
-            if (xQueueReceive(xCmdQueue, &cmd_data, 0)) {
-                switch (cmd_data.cmd) {
+            if (xQueueReceive(xCmdQueue, &task_cmd_data, 0)) {
+                switch (task_cmd_data.cmd) {
                 case E_LORA_CMD_INIT:
                     // save the new configuration first
-                    lora_set_config(&cmd_data);
-                    if (cmd_data.info.init.stack_mode == E_LORA_STACK_MODE_LORAWAN) {
+                    lora_set_config(&task_cmd_data);
+                    if (task_cmd_data.info.init.stack_mode == E_LORA_STACK_MODE_LORAWAN) {
                         LoRaMacPrimitives.MacMcpsConfirm = McpsConfirm;
                         LoRaMacPrimitives.MacMcpsIndication = McpsIndication;
                         LoRaMacPrimitives.MacMlmeConfirm = MlmeConfirm;
                         LoRaMacCallbacks.GetBatteryLevel = BoardGetBatteryLevel;
-                        LoRaMacInitialization(&LoRaMacPrimitives, &LoRaMacCallbacks);
+                        LoRaMacInitialization(&LoRaMacPrimitives, &LoRaMacCallbacks, task_cmd_data.info.init.region);
 
+                        TimerStop(&TxNextActReqTimer);
                         TimerInit(&TxNextActReqTimer, OnTxNextActReqTimerEvent);
                         TimerSetValue(&TxNextActReqTimer, OVER_THE_AIR_ACTIVATION_DUTYCYCLE);
 
                         mibReq.Type = MIB_ADR;
-                        mibReq.Param.AdrEnable = cmd_data.info.init.adr;
+                        mibReq.Param.AdrEnable = task_cmd_data.info.init.adr;
                         LoRaMacMibSetRequestConfirm(&mibReq);
 
                         mibReq.Type = MIB_PUBLIC_NETWORK;
-                        mibReq.Param.EnablePublicNetwork = cmd_data.info.init.public;
+                        mibReq.Param.EnablePublicNetwork = task_cmd_data.info.init.public;
                         LoRaMacMibSetRequestConfirm(&mibReq);
 
                         mibReq.Type = MIB_DEVICE_CLASS;
-                        mibReq.Param.Class = cmd_data.info.init.device_class;
+                        mibReq.Param.Class = task_cmd_data.info.init.device_class;
                         LoRaMacMibSetRequestConfirm(&mibReq);
 
-                    #if defined(USE_BAND_868)
                         LoRaMacTestSetDutyCycleOn(false);
-                    #endif
-
-                        // change the frequency to be on the center of the band
-                        lora_obj.frequency = RF_FREQUENCY_CENTER;
 
                         // check if we have already joined the network
                         if (lora_obj.joined) {
                             uint32_t length;
                             bool result = true;
                             result &= modlora_nvs_get_uint(E_LORA_NVS_ELE_NET_ID, (uint32_t *)&lora_obj.net_id);
-                            result &= modlora_nvs_get_uint(E_LORA_NVS_ELE_DEVADDR, (uint32_t *)&lora_obj.abp.DevAddr);
+                            result &= modlora_nvs_get_uint(E_LORA_NVS_ELE_DEVADDR, (uint32_t *)&lora_obj.u.abp.DevAddr);
                             length = 16;
-                            result &= modlora_nvs_get_blob(E_LORA_NVS_ELE_NWSKEY, (void *)lora_obj.abp.NwkSKey, &length);
+                            result &= modlora_nvs_get_blob(E_LORA_NVS_ELE_NWSKEY, (void *)lora_obj.u.abp.NwkSKey, &length);
                             length = 16;
-                            result &= modlora_nvs_get_blob(E_LORA_NVS_ELE_APPSKEY, (void *)lora_obj.abp.AppSKey, &length);
+                            result &= modlora_nvs_get_blob(E_LORA_NVS_ELE_APPSKEY, (void *)lora_obj.u.abp.AppSKey, &length);
 
                             uint32_t uplinks, downlinks;
                             result &= modlora_nvs_get_uint(E_LORA_NVS_ELE_UPLINK, &uplinks);
                             result &= modlora_nvs_get_uint(E_LORA_NVS_ELE_DWLINK, &downlinks);
+                            result &= modlora_nvs_get_uint(E_LORA_NVS_ELE_ADR_ACKS, LoRaMacGetAdrAckCounter());
 
                             if (result) {
                                 mibReq.Type = MIB_UPLINK_COUNTER;
@@ -732,8 +743,65 @@ static void TASK_LoRa (void *pvParameters) {
                                 mibReq.Param.DownLinkCounter = downlinks;
                                 LoRaMacMibSetRequestConfirm( &mibReq );
 
+                                // write the MAC params directly from the NVRAM
+                                length = sizeof(LoRaMacParams_t);
+                                modlora_nvs_get_blob(E_LORA_NVS_ELE_MAC_PARAMS, (void *)LoRaMacGetMacParams(), &length);
+
+                                // write the channel list directly from the NVRAM
+                                ChannelParams_t *channels;
+                                LoRaMacGetChannelList(&channels, &length);
+                                modlora_nvs_get_blob(E_LORA_NVS_ELE_CHANNELS, channels, &length);
+
+                                // write the channel mask directly from the NVRAM
+                                uint16_t *channelmask;
+                                if (LoRaMacGetChannelsMask(&channelmask, &length)) {
+                                    modlora_nvs_get_blob(E_LORA_NVS_ELE_CHANNELMASK, channelmask, &length);
+                                }
+
+                                // write the channel mask remaining directly from the NVRAM
+                                if (LoRaMacGetChannelsMaskRemaining(&channelmask, &length)) {
+                                    modlora_nvs_get_blob(E_LORA_NVS_ELE_CHANNELMASK_REMAINING, channelmask, &length);
+                                }
+
+                                uint32_t srv_ack_req;
+                                modlora_nvs_get_uint(E_LORA_NVS_ELE_ACK_REQ, (uint32_t *)&srv_ack_req);
+                                bool *ack_req = LoRaMacGetSrvAckRequested();
+                                if (srv_ack_req) {
+                                    *ack_req = true;
+                                } else {
+                                    *ack_req = false;
+                                }
+
+                                uint32_t mac_cmd_next_tx;
+                                modlora_nvs_get_uint(E_LORA_NVS_MAC_NXT_TX, (uint32_t *)&mac_cmd_next_tx);
+                                bool *next_tx = LoRaMacGetMacCmdNextTx();
+                                if (mac_cmd_next_tx) {
+                                    *next_tx = true;
+                                } else {
+                                    *next_tx = false;
+                                }
+
+                                uint32_t mac_cmd_buffer_idx;
+                                modlora_nvs_get_uint(E_LORA_NVS_MAC_CMD_BUF_IDX, (uint32_t *)&mac_cmd_buffer_idx);
+                                uint8_t *buffer_idx = LoRaMacGetMacCmdBufferIndex();
+                                *buffer_idx = mac_cmd_buffer_idx;
+
+                                modlora_nvs_get_uint(E_LORA_NVS_MAC_CMD_BUF_RPT_IDX, (uint32_t *)&mac_cmd_buffer_idx);
+                                buffer_idx = LoRaMacGetMacCmdBufferRepeatIndex();
+                                *buffer_idx = mac_cmd_buffer_idx;
+
+                                // write the buffered MAC commads directly from NVRAM
+                                length = 128;
+                                modlora_nvs_get_blob(E_LORA_NVS_ELE_MAC_BUF, (void *)LoRaMacGetMacCmdBuffer(), &length);
+
+                                // write the buffered MAC commads to repeat directly from NVRAM
+                                length = 128;
+                                modlora_nvs_get_blob(E_LORA_NVS_ELE_MAC_RPT_BUF, (void *)LoRaMacGetMacCmdBufferRepeat(), &length);
+
                                 lora_obj.activation = E_LORA_ACTIVATION_ABP;
                                 lora_obj.state = E_LORA_STATE_JOIN;
+                                // clear the joined flag until the nvram_save method is called again
+                                modlora_nvs_set_uint(E_LORA_NVS_ELE_JOINED, (uint32_t)false);
                             } else {
                                 lora_obj.state = E_LORA_STATE_IDLE;
                             }
@@ -750,7 +818,7 @@ static void TASK_LoRa (void *pvParameters) {
                         Radio.Init(&RadioEvents);
 
                         // radio configuration
-                        lora_radio_setup(&cmd_data.info.init);
+                        lora_radio_setup(&task_cmd_data.info.init);
                         lora_obj.state = E_LORA_STATE_IDLE;
                     }
                     lora_obj.joined = false;
@@ -760,70 +828,86 @@ static void TASK_LoRa (void *pvParameters) {
                     break;
                 case E_LORA_CMD_JOIN:
                     lora_obj.joined = false;
-                    lora_obj.activation = cmd_data.info.join.activation;
+                    lora_obj.activation = task_cmd_data.info.join.activation;
                     if (lora_obj.activation == E_LORA_ACTIVATION_OTAA) {
-                        memcpy((void *)lora_obj.otaa.DevEui, cmd_data.info.join.otaa.DevEui, sizeof(lora_obj.otaa.DevEui));
-                        memcpy((void *)lora_obj.otaa.AppEui, cmd_data.info.join.otaa.AppEui, sizeof(lora_obj.otaa.AppEui));
-                        memcpy((void *)lora_obj.otaa.AppKey, cmd_data.info.join.otaa.AppKey, sizeof(lora_obj.otaa.AppKey));
-                        lora_obj.otaa_dr = cmd_data.info.join.otaa_dr;
+                        memcpy((void *)lora_obj.u.otaa.DevEui, task_cmd_data.info.join.u.otaa.DevEui, sizeof(lora_obj.u.otaa.DevEui));
+                        memcpy((void *)lora_obj.u.otaa.AppEui, task_cmd_data.info.join.u.otaa.AppEui, sizeof(lora_obj.u.otaa.AppEui));
+                        memcpy((void *)lora_obj.u.otaa.AppKey, task_cmd_data.info.join.u.otaa.AppKey, sizeof(lora_obj.u.otaa.AppKey));
+                        lora_obj.otaa_dr = task_cmd_data.info.join.otaa_dr;
                     } else {
                         lora_obj.net_id = DEF_LORAWAN_NETWORK_ID;
-                        lora_obj.abp.DevAddr = cmd_data.info.join.abp.DevAddr;
-                        memcpy((void *)lora_obj.abp.AppSKey, cmd_data.info.join.abp.AppSKey, sizeof(lora_obj.abp.AppSKey));
-                        memcpy((void *)lora_obj.abp.NwkSKey, cmd_data.info.join.abp.NwkSKey, sizeof(lora_obj.abp.NwkSKey));
+                        lora_obj.u.abp.DevAddr = task_cmd_data.info.join.u.abp.DevAddr;
+                        memcpy((void *)lora_obj.u.abp.AppSKey, task_cmd_data.info.join.u.abp.AppSKey, sizeof(lora_obj.u.abp.AppSKey));
+                        memcpy((void *)lora_obj.u.abp.NwkSKey, task_cmd_data.info.join.u.abp.NwkSKey, sizeof(lora_obj.u.abp.NwkSKey));
                     }
                     lora_obj.state = E_LORA_STATE_JOIN;
                     break;
                 case E_LORA_CMD_TX:
-                    Radio.Send(cmd_data.info.tx.data, cmd_data.info.tx.len);
+                #if defined(FIPY) || defined(LOPY4)
+                    xSemaphoreTake(xLoRaSigfoxSem, portMAX_DELAY);
+                #endif
+                    Radio.Send(task_cmd_data.info.tx.data, task_cmd_data.info.tx.len);
                     lora_obj.state = E_LORA_STATE_TX;
                     break;
                 case E_LORA_CMD_CONFIG_CHANNEL:
-                    if (cmd_data.info.channel.add) {
+                    if (task_cmd_data.info.channel.add) {
                         ChannelParams_t channel =
-                        { cmd_data.info.channel.frequency, {((cmd_data.info.channel.dr_max << 4) | cmd_data.info.channel.dr_min)}, 0};
-                        LoRaMacChannelManualAdd(cmd_data.info.channel.index, channel);
+                        { task_cmd_data.info.channel.frequency, 0, {((task_cmd_data.info.channel.dr_max << 4) | task_cmd_data.info.channel.dr_min)}, 0};
+                        ChannelAddParams_t channelAdd = { &channel, task_cmd_data.info.channel.index };
+                        RegionChannelManualAdd(lora_obj.region, &channelAdd);
                     } else {
-                        LoRaMacChannelManualRemove(cmd_data.info.channel.index);
+                        ChannelRemoveParams_t channelRemove = { task_cmd_data.info.channel.index };
+                        RegionChannelsManualRemove(lora_obj.region, &channelRemove);
                     }
                     xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
                     break;
-                case E_LORA_CMD_LORAWAN_TX:
-                    {
-                        McpsReq_t mcpsReq;
+                case E_LORA_CMD_LORAWAN_TX: {
                         LoRaMacTxInfo_t txInfo;
                         EventBits_t status = 0;
                         bool empty_frame = false;
+                        int8_t mac_datarate = 0;
 
-                        // set the data rate before checking if Tx is possible
-                        MibRequestConfirm_t mibReq;
-                        mibReq.Type = MIB_CHANNELS_DATARATE;
-                        mibReq.Param.ChannelsDatarate = cmd_data.info.tx.dr;
-                        LoRaMacMibSetRequestConfirm( &mibReq );
+                        // set the new data rate before checking if Tx is possible, but store the current one
+                        if (!lora_obj.adr) {
+                            mibReq.Type = MIB_CHANNELS_DATARATE;
+                            LoRaMacMibGetRequestConfirm( &mibReq );
+                            mac_datarate = mibReq.Param.ChannelsDatarate;
+                            mibReq.Param.ChannelsDatarate = task_cmd_data.info.tx.dr;
+                            LoRaMacMibSetRequestConfirm( &mibReq );
+                        }
 
-                        if (LoRaMacQueryTxPossible (cmd_data.info.tx.len, &txInfo) != LORAMAC_STATUS_OK) {
+                        if (LoRaMacQueryTxPossible (task_cmd_data.info.tx.len, &txInfo) != LORAMAC_STATUS_OK) {
                             // send an empty frame in order to flush MAC commands
                             mcpsReq.Type = MCPS_UNCONFIRMED;
                             mcpsReq.Req.Unconfirmed.fBuffer = NULL;
                             mcpsReq.Req.Unconfirmed.fBufferSize = 0;
-                            mcpsReq.Req.Unconfirmed.Datarate = cmd_data.info.tx.dr;
+                            mcpsReq.Req.Unconfirmed.Datarate = task_cmd_data.info.tx.dr;
                             empty_frame = true;
                             status |= LORA_STATUS_MSG_SIZE;
                         } else {
-                            if (cmd_data.info.tx.confirmed) {
+                            if (task_cmd_data.info.tx.confirmed) {
                                 mcpsReq.Type = MCPS_CONFIRMED;
-                                mcpsReq.Req.Confirmed.fPort = cmd_data.info.tx.port;
-                                mcpsReq.Req.Confirmed.fBuffer = cmd_data.info.tx.data;
-                                mcpsReq.Req.Confirmed.fBufferSize = cmd_data.info.tx.len;
+                                mcpsReq.Req.Confirmed.fPort = task_cmd_data.info.tx.port;
+                                mcpsReq.Req.Confirmed.fBuffer = task_cmd_data.info.tx.data;
+                                mcpsReq.Req.Confirmed.fBufferSize = task_cmd_data.info.tx.len;
                                 mcpsReq.Req.Confirmed.NbTrials = lora_obj.tx_retries + 1;
-                                mcpsReq.Req.Confirmed.Datarate = cmd_data.info.tx.dr;
+                                mcpsReq.Req.Confirmed.Datarate = task_cmd_data.info.tx.dr;
                             } else {
                                 mcpsReq.Type = MCPS_UNCONFIRMED;
-                                mcpsReq.Req.Unconfirmed.fPort = cmd_data.info.tx.port;
-                                mcpsReq.Req.Unconfirmed.fBuffer = cmd_data.info.tx.data;
-                                mcpsReq.Req.Unconfirmed.fBufferSize = cmd_data.info.tx.len;
-                                mcpsReq.Req.Unconfirmed.Datarate = cmd_data.info.tx.dr;
+                                mcpsReq.Req.Unconfirmed.fPort = task_cmd_data.info.tx.port;
+                                mcpsReq.Req.Unconfirmed.fBuffer = task_cmd_data.info.tx.data;
+                                mcpsReq.Req.Unconfirmed.fBufferSize = task_cmd_data.info.tx.len;
+                                mcpsReq.Req.Unconfirmed.Datarate = task_cmd_data.info.tx.dr;
                             }
+                        }
+                    #if defined(FIPY) || defined(LOPY4)
+                        xSemaphoreTake(xLoRaSigfoxSem, portMAX_DELAY);
+                    #endif
+
+                        // set back the original datarate
+                        if (!lora_obj.adr) {
+                            mibReq.Param.ChannelsDatarate = mac_datarate;
+                            LoRaMacMibSetRequestConfirm( &mibReq );
                         }
 
                         if (LoRaMacMcpsRequest(&mcpsReq) != LORAMAC_STATUS_OK || empty_frame) {
@@ -831,6 +915,9 @@ static void TASK_LoRa (void *pvParameters) {
                             lora_obj.state = E_LORA_STATE_IDLE;
                             status |= LORA_STATUS_ERROR;
                             xEventGroupSetBits(LoRaEvents, status);
+                        #if defined(FIPY) || defined(LOPY4)
+                            xSemaphoreGive(xLoRaSigfoxSem);
+                        #endif
                         } else {
                             lora_obj.state = E_LORA_STATE_TX;
                         }
@@ -840,12 +927,18 @@ static void TASK_LoRa (void *pvParameters) {
                     Radio.Sleep();
                     lora_obj.state = E_LORA_STATE_SLEEP;
                     xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
+                #if defined(FIPY) || defined(LOPY4)
+                    xSemaphoreGive(xLoRaSigfoxSem);
+                #endif
                     break;
                 case E_LORA_CMD_WAKE_UP:
                     // just enable the receiver again
                     Radio.Rx(LORA_RX_TIMEOUT);
                     lora_obj.state = E_LORA_STATE_RX;
                     xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
+                #if defined(FIPY) || defined(LOPY4)
+                    xSemaphoreGive(xLoRaSigfoxSem);
+                #endif
                     break;
                 default:
                     break;
@@ -859,11 +952,15 @@ static void TASK_LoRa (void *pvParameters) {
             TimerStop( &TxNextActReqTimer );
             if (!lora_obj.joined) {
                 if (lora_obj.activation == E_LORA_ACTIVATION_OTAA) {
+                #if defined(FIPY) || defined(LOPY4)
+                    xSemaphoreTake(xLoRaSigfoxSem, portMAX_DELAY);
+                #endif
                     TimerStart( &TxNextActReqTimer );
                     mlmeReq.Type = MLME_JOIN;
-                    mlmeReq.Req.Join.DevEui = (uint8_t *)lora_obj.otaa.DevEui;
-                    mlmeReq.Req.Join.AppEui = (uint8_t *)lora_obj.otaa.AppEui;
-                    mlmeReq.Req.Join.AppKey = (uint8_t *)lora_obj.otaa.AppKey;
+                    mlmeReq.Req.Join.DevEui = (uint8_t *)lora_obj.u.otaa.DevEui;
+                    mlmeReq.Req.Join.AppEui = (uint8_t *)lora_obj.u.otaa.AppEui;
+                    mlmeReq.Req.Join.AppKey = (uint8_t *)lora_obj.u.otaa.AppKey;
+                    mlmeReq.Req.Join.NbTrials = 1;
                     mlmeReq.Req.Join.DR = (uint8_t) lora_obj.otaa_dr;
                     LoRaMacMlmeRequest( &mlmeReq );
                 } else {
@@ -872,15 +969,15 @@ static void TASK_LoRa (void *pvParameters) {
                     LoRaMacMibSetRequestConfirm( &mibReq );
 
                     mibReq.Type = MIB_DEV_ADDR;
-                    mibReq.Param.DevAddr = (uint32_t)lora_obj.abp.DevAddr;
+                    mibReq.Param.DevAddr = (uint32_t)lora_obj.u.abp.DevAddr;
                     LoRaMacMibSetRequestConfirm( &mibReq );
 
                     mibReq.Type = MIB_NWK_SKEY;
-                    mibReq.Param.NwkSKey = (uint8_t *)lora_obj.abp.NwkSKey;
+                    mibReq.Param.NwkSKey = (uint8_t *)lora_obj.u.abp.NwkSKey;
                     LoRaMacMibSetRequestConfirm( &mibReq );
 
                     mibReq.Type = MIB_APP_SKEY;
-                    mibReq.Param.AppSKey = (uint8_t *)lora_obj.abp.AppSKey;
+                    mibReq.Param.AppSKey = (uint8_t *)lora_obj.u.abp.AppSKey;
                     LoRaMacMibSetRequestConfirm( &mibReq );
 
                     mibReq.Type = MIB_NETWORK_JOINED;
@@ -912,16 +1009,23 @@ static void TASK_LoRa (void *pvParameters) {
             Radio.Sleep();
             xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
             lora_obj.state = E_LORA_STATE_IDLE;
+        #if defined(FIPY) || defined(LOPY4)
+            xSemaphoreGive(xLoRaSigfoxSem);
+        #endif
             break;
         case E_LORA_STATE_TX_TIMEOUT:
             // we need to perform a mode transition in order to clear the TxRx FIFO
             Radio.Sleep();
             xEventGroupSetBits(LoRaEvents, LORA_STATUS_ERROR);
             lora_obj.state = E_LORA_STATE_IDLE;
+        #if defined(FIPY) || defined(LOPY4)
+            xSemaphoreGive(xLoRaSigfoxSem);
+        #endif
             break;
         default:
             break;
         }
+
         TimerLowPowerHandler();
     }
 }
@@ -929,7 +1033,7 @@ static void TASK_LoRa (void *pvParameters) {
 static void lora_callback_handler(void *arg) {
     lora_obj_t *self = arg;
 
-    if (self->handler != mp_const_none) {
+    if (self->handler && self->handler != mp_const_none) {
         mp_call_function_1(self->handler, self->handler_arg);
     }
 }
@@ -976,62 +1080,6 @@ static IRAM_ATTR void OnRxError (void) {
 static void lora_radio_setup (lora_init_cmd_data_t *init_data) {
     uint16_t symbol_to = 8;
 
-#if defined( USE_BAND_868 )
-    // For higher datarates, we increase the number of symbols generating a Rx Timeout
-    if (init_data->sf == 9 || init_data->sf == 8) {
-        symbol_to = 12;
-    } else if(init_data->sf == 7) {
-        if (init_data->bandwidth >= E_LORA_BW_250_KHZ) {
-            symbol_to = 20;
-        } else {
-            symbol_to = 15;
-        }
-    } else if (init_data->sf == 6) {
-        if (init_data->bandwidth >= E_LORA_BW_250_KHZ) {
-            symbol_to = 30;
-        } else {
-            symbol_to = 25;
-        }
-    }
-#else
-    // For higher datarates, we increase the number of symbols generating a Rx Timeout
-    if (init_data->bandwidth == E_LORA_BW_125_KHZ) {
-        switch(init_data->sf) {
-            case 10:      // SF10 - BW125
-                symbol_to = 8;
-                break;
-            case 9:       // SF9  - BW125
-            case 8:       // SF8  - BW125
-                symbol_to = 12;
-                break;
-            case 7:       // SF7  - BW125
-                symbol_to = 15;
-                break;
-            default:
-                break;
-        }
-    } else {
-        switch(init_data->sf) {
-            case 12:       // SF12 - BW500
-            case 11:       // SF11 - BW500
-            case 10:       // SF10 - BW500
-                symbol_to = 12;
-                break;
-            case 9:        // SF9  - BW500
-                symbol_to = 15;
-                break;
-            case 8:        // SF8  - BW500
-                symbol_to = 20;
-                break;
-            case 7:        // SF7  - BW500
-                symbol_to = 24;
-                break;
-            default:
-                break;
-        }
-    }
-#endif
-
     Radio.SetModem(MODEM_LORA);
 
     if (init_data->public) {
@@ -1071,9 +1119,79 @@ static void lora_validate_mode (uint32_t mode) {
 }
 
 static void lora_validate_frequency (uint32_t frequency) {
-    if (frequency < RF_FREQUENCY_MIN || frequency > RF_FREQUENCY_MAX) {
-        nlr_raise(mp_obj_new_exception_msg_varg(&mp_type_ValueError, "frequency %d out of range", frequency));
+    switch (lora_obj.region) {
+        case LORAMAC_REGION_AS923:
+            if (frequency < 915000000 || frequency > 928000000) {
+                goto freq_error;
+            }
+            break;
+        case LORAMAC_REGION_AU915:
+            if (frequency < 915000000 || frequency > 928000000) {
+                goto freq_error;
+            }
+            break;
+        case LORAMAC_REGION_US915:
+            if (frequency < 902000000 || frequency > 928000000) {
+                goto freq_error;
+            }
+            break;
+        case LORAMAC_REGION_US915_HYBRID:
+            if (frequency < 902000000 || frequency > 928000000) {
+                goto freq_error;
+            }
+            break;
+        case LORAMAC_REGION_EU868:
+        #if defined(LOPY4)
+            if (frequency < 410000000 || frequency > 870000000) {
+        #else
+            if (frequency < 863000000 || frequency > 870000000) {
+        #endif
+                goto freq_error;
+            }
+            break;
+        default:
+            break;
     }
+    return;
+
+freq_error:
+    nlr_raise(mp_obj_new_exception_msg_varg(&mp_type_ValueError, "frequency %d out of range", frequency));
+}
+
+static void lora_validate_channel (uint32_t index) {
+    switch (lora_obj.region) {
+        case LORAMAC_REGION_AS923:
+            if (index >= AS923_MAX_NB_CHANNELS) {
+                goto channel_error;
+            }
+            break;
+        case LORAMAC_REGION_AU915:
+            if (index >= AU915_MAX_NB_CHANNELS) {
+                goto channel_error;
+            }
+            break;
+        case LORAMAC_REGION_US915:
+            if (index >= US915_MAX_NB_CHANNELS) {
+                goto channel_error;
+            }
+            break;
+        case LORAMAC_REGION_US915_HYBRID:
+            if (index >= US915_HYBRID_MAX_NB_CHANNELS) {
+                goto channel_error;
+            }
+            break;
+        case LORAMAC_REGION_EU868:
+            if (index >= EU868_MAX_NB_CHANNELS) {
+                goto channel_error;
+            }
+            break;
+        default:
+            break;
+    }
+    return;
+
+channel_error:
+    nlr_raise(mp_obj_new_exception_msg_varg(&mp_type_ValueError, "channel %d out of range", index));
 }
 
 static void lora_validate_power (uint8_t tx_power) {
@@ -1083,15 +1201,24 @@ static void lora_validate_power (uint8_t tx_power) {
 }
 
 static bool lora_validate_data_rate (uint32_t data_rate) {
-#if defined(USE_BAND_868)
-    if (data_rate > DR_6) {
-        return false;
+
+    switch (lora_obj.region) {
+    case LORAMAC_REGION_AS923:
+    case LORAMAC_REGION_EU868:
+    case LORAMAC_REGION_AU915:
+        if (data_rate > DR_6) {
+            return false;
+        }
+        break;
+    case LORAMAC_REGION_US915:
+    case LORAMAC_REGION_US915_HYBRID:
+        if (data_rate > DR_4) {
+            return false;
+        }
+        break;
+    default:
+        break;
     }
-#else
-    if (data_rate > DR_4) {
-        return false;
-    }
-#endif
     return true;
 }
 
@@ -1126,6 +1253,13 @@ static void lora_validate_device_class (DeviceClass_t device_class) {
     }
 }
 
+static void lora_validate_region (LoRaMacRegion_t region) {
+    if (region != LORAMAC_REGION_AS923 && region != LORAMAC_REGION_AU915
+        && region != LORAMAC_REGION_EU868 && region != LORAMAC_REGION_US915) {
+            nlr_raise(mp_obj_new_exception_msg_varg(&mp_type_ValueError, "invalid region %d", region));
+    }
+}
+
 static void lora_set_config (lora_cmd_data_t *cmd_data) {
     lora_obj.stack_mode = cmd_data->info.init.stack_mode;
     lora_obj.bandwidth = cmd_data->info.init.bandwidth;
@@ -1141,6 +1275,7 @@ static void lora_set_config (lora_cmd_data_t *cmd_data) {
     lora_obj.public = cmd_data->info.init.public;
     lora_obj.tx_retries = cmd_data->info.init.tx_retries;
     lora_obj.device_class = cmd_data->info.init.device_class;
+    lora_obj.region = cmd_data->info.init.region;
 }
 
 static void lora_get_config (lora_cmd_data_t *cmd_data) {
@@ -1158,6 +1293,7 @@ static void lora_get_config (lora_cmd_data_t *cmd_data) {
     cmd_data->info.init.adr = lora_obj.adr;
     cmd_data->info.init.tx_retries = lora_obj.tx_retries;
     cmd_data->info.init.device_class = lora_obj.device_class;
+    cmd_data->info.init.region = lora_obj.region;
 }
 
 static void lora_send_cmd (lora_cmd_data_t *cmd_data) {
@@ -1178,6 +1314,14 @@ static void lora_send_cmd (lora_cmd_data_t *cmd_data) {
 
 static int32_t lora_send (const byte *buf, uint32_t len, uint32_t timeout_ms) {
     lora_cmd_data_t cmd_data;
+
+#if defined(FIPY) || defined(LOPY4)
+    xSemaphoreTake(xLoRaSigfoxSem, portMAX_DELAY);
+    lora_get_config (&cmd_data);
+    cmd_data.cmd = E_LORA_CMD_INIT;
+    lora_send_cmd (&cmd_data);
+    xSemaphoreGive(xLoRaSigfoxSem);
+#endif
 
     cmd_data.cmd = E_LORA_CMD_TX;
     memcpy (cmd_data.info.tx.data, buf, len);
@@ -1204,6 +1348,12 @@ static int32_t lora_send (const byte *buf, uint32_t len, uint32_t timeout_ms) {
                             pdFALSE,  // do not wait for all bits
                             (TickType_t)portMAX_DELAY);
     }
+
+    // calculate the time on air
+    lora_obj.tx_time_on_air = Radio.TimeOnAir(MODEM_LORA, len);
+    lora_obj.tx_counter += 1;
+    lora_obj.tx_frequency = lora_obj.frequency;
+
     // return the number of bytes sent
     return len;
 }
@@ -1296,11 +1446,58 @@ static mp_obj_t lora_init_helper(lora_obj_t *self, const mp_arg_val_t *args) {
     cmd_data.info.init.stack_mode = args[0].u_int;
     lora_validate_mode (cmd_data.info.init.stack_mode);
 
-    cmd_data.info.init.frequency = args[1].u_int;
-    lora_validate_frequency (cmd_data.info.init.frequency);
+    // we need to know the region first
+    if (args[14].u_obj == MP_OBJ_NULL) {
+        cmd_data.info.init.region = config_get_lora_region();
+        if (cmd_data.info.init.region == 0xff) {
+            nlr_raise(mp_obj_new_exception_msg_varg(&mp_type_ValueError, "no region specified and no default found in config block"));
+        }
+    } else {
+        cmd_data.info.init.region = mp_obj_get_int(args[14].u_obj);
+    }
+    lora_validate_region(cmd_data.info.init.region);
+    // we need to do it here in advance for the rest of the validation to work
+    lora_obj.region = cmd_data.info.init.region;
 
-    cmd_data.info.init.tx_power = args[2].u_int;
-    lora_validate_power (cmd_data.info.init.tx_power);
+    if (args[1].u_obj == MP_OBJ_NULL) {
+        switch (cmd_data.info.init.region) {
+        case LORAMAC_REGION_AS923:
+            cmd_data.info.init.frequency = 923000000;
+            break;
+        case LORAMAC_REGION_AU915:
+        case LORAMAC_REGION_US915:
+        case LORAMAC_REGION_US915_HYBRID:
+            cmd_data.info.init.frequency = 915000000;
+            break;
+        case LORAMAC_REGION_EU868:
+            cmd_data.info.init.frequency = 868000000;
+            break;
+        default:
+            break;
+        }
+    } else {
+        cmd_data.info.init.frequency = mp_obj_get_int(args[1].u_obj);
+        lora_validate_frequency (cmd_data.info.init.frequency);
+    }
+
+    if (args[2].u_obj == MP_OBJ_NULL) {
+        switch (cmd_data.info.init.region) {
+        case LORAMAC_REGION_AS923:
+        case LORAMAC_REGION_AU915:
+        case LORAMAC_REGION_US915:
+        case LORAMAC_REGION_US915_HYBRID:
+            cmd_data.info.init.tx_power = 20;
+            break;
+        case LORAMAC_REGION_EU868:
+            cmd_data.info.init.tx_power = 14;
+            break;
+        default:
+            break;
+        }
+    } else {
+        cmd_data.info.init.tx_power = mp_obj_get_int(args[2].u_obj);
+        lora_validate_power (cmd_data.info.init.tx_power);
+    }
 
     cmd_data.info.init.bandwidth = args[3].u_int;
     lora_validate_bandwidth (cmd_data.info.init.bandwidth);
@@ -1336,8 +1533,8 @@ static mp_obj_t lora_init_helper(lora_obj_t *self, const mp_arg_val_t *args) {
 STATIC const mp_arg_t lora_init_args[] = {
     { MP_QSTR_id,                             MP_ARG_INT,   {.u_int  = 0} },
     { MP_QSTR_mode,         MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int  = E_LORA_STACK_MODE_LORA} },
-    { MP_QSTR_frequency,    MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int  = RF_FREQUENCY_CENTER} },
-    { MP_QSTR_tx_power,     MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int  = TX_OUTPUT_POWER_DEAFULT} },
+    { MP_QSTR_frequency,    MP_ARG_KW_ONLY  | MP_ARG_OBJ,   {.u_obj  = MP_OBJ_NULL} },
+    { MP_QSTR_tx_power,     MP_ARG_KW_ONLY  | MP_ARG_OBJ,   {.u_obj  = MP_OBJ_NULL} },
     { MP_QSTR_bandwidth,    MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int  = E_LORA_BW_125_KHZ} },
     { MP_QSTR_sf,           MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int  = 7} },
     { MP_QSTR_preamble,     MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int  = 8} },
@@ -1348,7 +1545,8 @@ STATIC const mp_arg_t lora_init_args[] = {
     { MP_QSTR_adr,          MP_ARG_KW_ONLY  | MP_ARG_BOOL,  {.u_bool = false} },
     { MP_QSTR_public,       MP_ARG_KW_ONLY  | MP_ARG_BOOL,  {.u_bool = true} },
     { MP_QSTR_tx_retries,   MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int = 2} },
-    { MP_QSTR_device_class, MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int = CLASS_A} }
+    { MP_QSTR_device_class, MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int = CLASS_A} },
+    { MP_QSTR_region,       MP_ARG_KW_ONLY  | MP_ARG_OBJ,   {.u_obj = MP_OBJ_NULL} },
 };
 STATIC mp_obj_t lora_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_uint_t n_kw, const mp_obj_t *all_args) {
     // parse args
@@ -1361,9 +1559,6 @@ STATIC mp_obj_t lora_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_ui
     // setup the object
     lora_obj_t *self = (lora_obj_t *)&lora_obj;
     self->base.type = (mp_obj_t)&mod_network_nic_type_lora;
-
-    // give it to the sleep module
-    //pyb_sleep_set_wlan_obj(self); // FIXME
 
     // check the peripheral id
     if (args[0].u_int != 0) {
@@ -1422,36 +1617,75 @@ STATIC mp_obj_t lora_join(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_t *
         if (auth_len == 2) {
             mp_get_buffer_raise(auth[0], &bufinfo_1, MP_BUFFER_READ);
             mp_get_buffer_raise(auth[1], &bufinfo_2, MP_BUFFER_READ);
-            config_get_lpwan_mac(cmd_data.info.join.otaa.DevEui);
+            config_get_lpwan_mac(cmd_data.info.join.u.otaa.DevEui);
         } else {
             mp_get_buffer_raise(auth[0], &bufinfo_0, MP_BUFFER_READ);
-            memcpy(cmd_data.info.join.otaa.DevEui, bufinfo_0.buf, sizeof(cmd_data.info.join.otaa.DevEui));
+            memcpy(cmd_data.info.join.u.otaa.DevEui, bufinfo_0.buf, sizeof(cmd_data.info.join.u.otaa.DevEui));
             mp_get_buffer_raise(auth[1], &bufinfo_1, MP_BUFFER_READ);
             mp_get_buffer_raise(auth[2], &bufinfo_2, MP_BUFFER_READ);
         }
-        memcpy(cmd_data.info.join.otaa.AppEui, bufinfo_1.buf, sizeof(cmd_data.info.join.otaa.AppEui));
-        memcpy(cmd_data.info.join.otaa.AppKey, bufinfo_2.buf, sizeof(cmd_data.info.join.otaa.AppKey));
+        memcpy(cmd_data.info.join.u.otaa.AppEui, bufinfo_1.buf, sizeof(cmd_data.info.join.u.otaa.AppEui));
+        memcpy(cmd_data.info.join.u.otaa.AppKey, bufinfo_2.buf, sizeof(cmd_data.info.join.u.otaa.AppKey));
     } else {
         mp_obj_get_array_fixed_n(args[1].u_obj, 3, &auth);
         mp_get_buffer_raise(auth[1], &bufinfo_0, MP_BUFFER_READ);
         mp_get_buffer_raise(auth[2], &bufinfo_1, MP_BUFFER_READ);
-        cmd_data.info.join.abp.DevAddr = mp_obj_int_get_truncated(auth[0]);
-        memcpy(cmd_data.info.join.abp.NwkSKey, bufinfo_0.buf, sizeof(cmd_data.info.join.abp.NwkSKey));
-        memcpy(cmd_data.info.join.abp.AppSKey, bufinfo_1.buf, sizeof(cmd_data.info.join.abp.AppSKey));
+        cmd_data.info.join.u.abp.DevAddr = mp_obj_int_get_truncated(auth[0]);
+        memcpy(cmd_data.info.join.u.abp.NwkSKey, bufinfo_0.buf, sizeof(cmd_data.info.join.u.abp.NwkSKey));
+        memcpy(cmd_data.info.join.u.abp.AppSKey, bufinfo_1.buf, sizeof(cmd_data.info.join.u.abp.AppSKey));
     }
 
     // need a way to indicate an invalid data rate so the default approach is used
-    uint32_t dr = LORAWAN_MAX_JOIN_DATARATE;
+    uint32_t dr = DR_0;
+    switch (lora_obj.region) {
+    case LORAMAC_REGION_AS923:
+        dr = DR_2;
+        break;
+    case LORAMAC_REGION_AU915:
+        dr = DR_6;
+        break;
+    case LORAMAC_REGION_US915:
+    case LORAMAC_REGION_US915_HYBRID:
+        dr = DR_4;
+        break;
+    case LORAMAC_REGION_EU868:
+        dr = DR_5;
+        break;
+    default:
+        break;
+    }
 
     // get the data rate
     if (args[2].u_obj != mp_const_none) {
         dr = mp_obj_get_int(args[2].u_obj);
-    #if defined(USE_BAND_868)
-        if (dr > DR_5) {
-    #else
-        if (dr > DR_4) {
-    #endif
-            nlr_raise(mp_obj_new_exception_msg_varg(&mp_type_ValueError, "invalid join data rate %d", dr));
+        switch (lora_obj.region) {
+        case LORAMAC_REGION_AS923:
+            if (dr != DR_2) {
+                goto dr_error;
+            }
+            break;
+        case LORAMAC_REGION_AU915:
+            if (dr != DR_0 && dr != DR_6) {
+                goto dr_error;
+            }
+            break;
+        case LORAMAC_REGION_US915:
+            if (dr != DR_0 && dr != DR_4) {
+                goto dr_error;
+            }
+            break;
+        case LORAMAC_REGION_US915_HYBRID:
+            if (dr != DR_0 && dr != DR_4) {
+                goto dr_error;
+            }
+            break;
+        case LORAMAC_REGION_EU868:
+            if (dr > DR_5) {
+                goto dr_error;
+            }
+            break;
+        default:
+            break;
         }
     }
     cmd_data.info.join.otaa_dr = dr;
@@ -1477,6 +1711,9 @@ STATIC mp_obj_t lora_join(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_t *
         }
     }
     return mp_const_none;
+
+dr_error:
+    nlr_raise(mp_obj_new_exception_msg_varg(&mp_type_ValueError, "invalid join data rate %d", dr));
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(lora_join_obj, 1, lora_join);
 
@@ -1662,7 +1899,9 @@ STATIC mp_obj_t lora_stats(mp_obj_t self_in) {
     float snr;
 
     static const qstr lora_stats_info_fields[] = {
-        MP_QSTR_rx_timestamp, MP_QSTR_rssi, MP_QSTR_snr, MP_QSTR_sfrx, MP_QSTR_sftx, MP_QSTR_tx_trials
+        MP_QSTR_rx_timestamp, MP_QSTR_rssi, MP_QSTR_snr, MP_QSTR_sfrx, MP_QSTR_sftx,
+        MP_QSTR_tx_trials, MP_QSTR_tx_power, MP_QSTR_tx_time_on_air, MP_QSTR_tx_counter,
+        MP_QSTR_tx_frequency
     };
 
     if (self->snr & 0x80)  { // the SNR sign bit is 1
@@ -1674,13 +1913,17 @@ STATIC mp_obj_t lora_stats(mp_obj_t self_in) {
         snr = (self->snr & 0xFF) / 4;
     }
 
-    mp_obj_t stats_tuple[6];
+    mp_obj_t stats_tuple[10];
     stats_tuple[0] = mp_obj_new_int_from_uint(self->rx_timestamp);
     stats_tuple[1] = mp_obj_new_int(self->rssi);
     stats_tuple[2] = mp_obj_new_float(snr);
     stats_tuple[3] = mp_obj_new_int(self->sfrx);
     stats_tuple[4] = mp_obj_new_int(self->sftx);
     stats_tuple[5] = mp_obj_new_int(self->tx_trials);
+    stats_tuple[6] = mp_obj_new_int(self->tx_power);
+    stats_tuple[7] = mp_obj_new_int(self->tx_time_on_air);
+    stats_tuple[8] = mp_obj_new_int(self->tx_counter);
+    stats_tuple[9] = mp_obj_new_int(self->tx_frequency);
 
     return mp_obj_new_attrtuple(lora_stats_info_fields, sizeof(stats_tuple) / sizeof(stats_tuple[0]), stats_tuple);
 }
@@ -1706,9 +1949,7 @@ STATIC mp_obj_t lora_add_channel (mp_uint_t n_args, const mp_obj_t *pos_args, mp
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(args), allowed_args, args);
 
     uint32_t index = args[0].u_int;
-    if (index >= LORA_MAX_NB_CHANNELS) {
-        goto error;
-    }
+    lora_validate_channel(index);
 
     uint32_t frequency = args[1].u_int;
     uint32_t dr_min = args[2].u_int;
@@ -1736,9 +1977,7 @@ STATIC mp_obj_t lora_remove_channel (mp_obj_t self_in, mp_obj_t idx) {
     lora_cmd_data_t cmd_data;
 
     uint32_t index = mp_obj_get_int(idx);
-    if (index >= LORA_MAX_NB_CHANNELS) {
-        nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError, mpexception_value_invalid_arguments));
-    }
+    lora_validate_channel(index);
 
     cmd_data.info.channel.index = index;
     cmd_data.info.channel.add = false;
@@ -1802,7 +2041,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_1(lora_events_obj, lora_events);
 STATIC mp_obj_t lora_ischannel_free(mp_obj_t self_in, mp_obj_t rssi) {
     lora_obj_t *self = self_in;
 
-    if (Radio.IsChannelFree(MODEM_LORA, self->frequency, mp_obj_get_int(rssi))) {
+    if (Radio.IsChannelFree(MODEM_LORA, self->frequency, mp_obj_get_int(rssi), 2)) {
         return mp_const_true;
     }
     return mp_const_false;
@@ -1816,8 +2055,15 @@ STATIC mp_obj_t lora_set_battery_level(mp_obj_t self_in, mp_obj_t battery) {
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(lora_set_battery_level_obj, lora_set_battery_level);
 
 STATIC mp_obj_t lora_nvram_save (mp_obj_t self_in) {
-    modlora_nvs_set_uint(E_LORA_NVS_ELE_JOINED, lora_obj.joined);
+    LoRaMacRegion_t region = 0xFF;
+    modlora_nvs_get_uint(E_LORA_NVS_ELE_REGION, &region);
+    // if the region doesn't match, erase the previous stored data
+    if (region != lora_obj.region) {
+        lora_nvram_erase(NULL);
+    }
     LoRaMacNvsSave();
+    modlora_nvs_set_uint(E_LORA_NVS_ELE_REGION, (uint32_t)lora_obj.region);
+    modlora_nvs_set_uint(E_LORA_NVS_ELE_JOINED, (uint32_t)lora_obj.joined);
     if (ESP_OK != nvs_commit(modlora_nvs_handle)) {
         nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_operation_failed));
     }
@@ -1826,22 +2072,42 @@ STATIC mp_obj_t lora_nvram_save (mp_obj_t self_in) {
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(lora_nvram_save_obj, lora_nvram_save);
 
 STATIC mp_obj_t lora_nvram_restore (mp_obj_t self_in) {
-    uint32_t joined = false;
+    uint32_t joined = 0;
+    LoRaMacRegion_t region;
     lora_cmd_data_t cmd_data;
 
     if (modlora_nvs_get_uint(E_LORA_NVS_ELE_JOINED, &joined)) {
         lora_obj.joined = joined;
+        if (joined) {
+            if (modlora_nvs_get_uint(E_LORA_NVS_ELE_REGION, &region)) {
+                // only restore from NVRAM if the region matches
+                if (region == lora_obj.region) {
+                    lora_get_config (&cmd_data);
+                    cmd_data.cmd = E_LORA_CMD_INIT;
+                    lora_send_cmd (&cmd_data);
+                } else {
+                    // erase the previous NVRAM data
+                    lora_nvram_erase(NULL);
+                    lora_obj.joined = false;
+                }
+            }
+        }
     } else {
         lora_obj.joined = false;
     }
 
-    lora_get_config (&cmd_data);
-    cmd_data.cmd = E_LORA_CMD_INIT;
-    lora_send_cmd (&cmd_data);
-
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(lora_nvram_restore_obj, lora_nvram_restore);
+
+STATIC mp_obj_t lora_nvram_erase (mp_obj_t self_in) {
+    if (ESP_OK != nvs_erase_all(modlora_nvs_handle)) {
+        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_operation_failed));
+    }
+    nvs_commit(modlora_nvs_handle);
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(lora_nvram_erase_obj, lora_nvram_erase);
 
 STATIC const mp_map_elem_t lora_locals_dict_table[] = {
     // instance methods
@@ -1866,6 +2132,7 @@ STATIC const mp_map_elem_t lora_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_battery_level),   (mp_obj_t)&lora_set_battery_level_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_nvram_save),          (mp_obj_t)&lora_nvram_save_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_nvram_restore),       (mp_obj_t)&lora_nvram_restore_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_nvram_erase),         (mp_obj_t)&lora_nvram_erase_obj },
 
     // class constants
     { MP_OBJ_NEW_QSTR(MP_QSTR_LORA),                MP_OBJ_NEW_SMALL_INT(E_LORA_STACK_MODE_LORA) },
@@ -1893,6 +2160,11 @@ STATIC const mp_map_elem_t lora_locals_dict_table[] = {
 
     { MP_OBJ_NEW_QSTR(MP_QSTR_CLASS_A),             MP_OBJ_NEW_SMALL_INT(CLASS_A) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_CLASS_C),             MP_OBJ_NEW_SMALL_INT(CLASS_C) },
+
+    { MP_OBJ_NEW_QSTR(MP_QSTR_AS923),               MP_OBJ_NEW_SMALL_INT(LORAMAC_REGION_AS923) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_AU915),               MP_OBJ_NEW_SMALL_INT(LORAMAC_REGION_AU915) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_EU868),               MP_OBJ_NEW_SMALL_INT(LORAMAC_REGION_EU868) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_US915),               MP_OBJ_NEW_SMALL_INT(LORAMAC_REGION_US915) },
 };
 
 STATIC MP_DEFINE_CONST_DICT(lora_locals_dict, lora_locals_dict_table);
@@ -1924,22 +2196,30 @@ static int lora_socket_socket (mod_network_socket_obj_t *s, int *_errno) {
         *_errno = MP_ENETDOWN;
         return -1;
     }
-    s->sock_base.sd = 1;
-#if defined(USE_BAND_868)
-    LORAWAN_SOCKET_SET_DR(s->sock_base.sd, DR_5);
-#else
-    LORAWAN_SOCKET_SET_DR(s->sock_base.sd, DR_3);
-#endif
+    s->sock_base.u.sd = 1;
+    uint32_t dr = DR_0;
+    switch (lora_obj.region) {
+    case LORAMAC_REGION_AS923:
+    case LORAMAC_REGION_EU868:
+        dr = DR_5;
+        break;
+    case LORAMAC_REGION_AU915:
+    case LORAMAC_REGION_US915:
+    case LORAMAC_REGION_US915_HYBRID:
+        dr = DR_4;
+        break;
+    default:
+        break;
+    }
+    LORAWAN_SOCKET_SET_DR(s->sock_base.u.sd, dr);
+
     // port number 2 is the default one
-    LORAWAN_SOCKET_SET_PORT(s->sock_base.sd, 2);
+    LORAWAN_SOCKET_SET_PORT(s->sock_base.u.sd, 2);
     return 0;
 }
 
 static void lora_socket_close (mod_network_socket_obj_t *s) {
-    // this is to prevent the finalizer to close a socket that failed during creation
-    if (s->sock_base.sd > 0) {
-        s->sock_base.sd = -1;
-    }
+    s->sock_base.u.sd = -1;
 }
 
 static int lora_socket_send (mod_network_socket_obj_t *s, const byte *buf, mp_uint_t len, int *_errno) {
@@ -1958,9 +2238,9 @@ static int lora_socket_send (mod_network_socket_obj_t *s, const byte *buf, mp_ui
         } else {
             if (lora_obj.joined) {
                 n_bytes = lorawan_send (buf, len, s->sock_base.timeout,
-                                        LORAWAN_SOCKET_IS_CONFIRMED(s->sock_base.sd),
-                                        LORAWAN_SOCKET_GET_DR(s->sock_base.sd),
-                                        LORAWAN_SOCKET_GET_PORT(s->sock_base.sd));
+                                        LORAWAN_SOCKET_IS_CONFIRMED(s->sock_base.u.sd),
+                                        LORAWAN_SOCKET_GET_DR(s->sock_base.u.sd),
+                                        LORAWAN_SOCKET_GET_PORT(s->sock_base.u.sd));
             } else {
                 *_errno = MP_ENETDOWN;
                 return -1;
@@ -2008,16 +2288,16 @@ static int lora_socket_setsockopt(mod_network_socket_obj_t *s, mp_uint_t level, 
 
     if (opt == SO_LORAWAN_CONFIRMED) {
         if (*(uint8_t *)optval) {
-            LORAWAN_SOCKET_SET_CONFIRMED(s->sock_base.sd);
+            LORAWAN_SOCKET_SET_CONFIRMED(s->sock_base.u.sd);
         } else {
-            LORAWAN_SOCKET_CLR_CONFIRMED(s->sock_base.sd);
+            LORAWAN_SOCKET_CLR_CONFIRMED(s->sock_base.u.sd);
         }
     } else if (opt == SO_LORAWAN_DR) {
         if (!lora_validate_data_rate(*(uint32_t *)optval)) {
             *_errno = MP_EOPNOTSUPP;
             return -1;
         }
-        LORAWAN_SOCKET_SET_DR(s->sock_base.sd, *(uint8_t *)optval);
+        LORAWAN_SOCKET_SET_DR(s->sock_base.u.sd, *(uint8_t *)optval);
     } else {
         *_errno = MP_EOPNOTSUPP;
         return -1;
@@ -2037,7 +2317,7 @@ static int lora_socket_bind(mod_network_socket_obj_t *s, byte *ip, mp_uint_t por
         *_errno = MP_EOPNOTSUPP;
         return -1;
     }
-    LORAWAN_SOCKET_SET_PORT(s->sock_base.sd, port);
+    LORAWAN_SOCKET_SET_PORT(s->sock_base.u.sd, port);
     return 0;
 }
 

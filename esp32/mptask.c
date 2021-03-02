@@ -34,6 +34,7 @@
 #include "readline.h"
 #include "esp32_mphal.h"
 #include "machuart.h"
+#include "machwdt.h"
 #include "machpin.h"
 #include "mpexception.h"
 #include "moduos.h"
@@ -43,11 +44,17 @@
 #include "modnetwork.h"
 #include "modwlan.h"
 #include "antenna.h"
+#include "modled.h"
+#include "esp_log.h"
 
-#if defined(LOPY)
+#if defined (LOPY) || defined (LOPY4) || defined (FIPY)
 #include "modlora.h"
-#elif defined(SIPY)
+#endif
+#if defined (SIPY) || defined(LOPY4) || defined (FIPY)
 #include "sigfox/modsigfox.h"
+#endif
+#if defined (GPY) || defined (FIPY)
+#include "modlte.h"
 #endif
 
 #include "random.h"
@@ -70,6 +77,7 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 
+
 /******************************************************************************
  DECLARE EXTERNAL FUNCTIONS
  ******************************************************************************/
@@ -79,13 +87,14 @@ extern void modpycom_init0(void);
  DECLARE PRIVATE CONSTANTS
  ******************************************************************************/
 #define GC_POOL_SIZE_BYTES                                          (67 * 1024)
+#define GC_POOL_SIZE_BYTES_PSRAM                                    ((2048 + 512) * 1024)
 
 /******************************************************************************
  DECLARE PRIVATE FUNCTIONS
  ******************************************************************************/
 STATIC void mptask_preinit (void);
 STATIC void mptask_init_sflash_filesystem (void);
-#if defined(LOPY) || defined(SIPY)
+#if defined (LOPY) || defined (SIPY) || defined (LOPY4) || defined (FIPY)
 STATIC void mptask_update_lpwan_mac_address (void);
 #endif
 STATIC void mptask_enable_wifi_ap (void);
@@ -94,7 +103,8 @@ STATIC void mptask_create_main_py (void);
 /******************************************************************************
  DECLARE PUBLIC DATA
  ******************************************************************************/
-extern StackType_t mpTaskStack;
+extern StackType_t *mpTaskStack;
+extern TaskHandle_t svTaskHandle;
 
 /******************************************************************************
  DECLARE PRIVATE DATA
@@ -111,10 +121,20 @@ static char fresh_boot_py[] = "# boot.py -- run on boot-up\r\n";
 void TASK_Micropython (void *pvParameters) {
     // initialize the garbage collector with the top of our stack
     volatile uint32_t sp = (uint32_t)get_sp();
+    uint32_t gc_pool_size;
     bool soft_reset = false;
     bool wifi_on_boot;
+    esp_chip_info_t chip_info;
+    uint32_t stack_len;
 
-    // init the antenna select switch here
+    esp_chip_info(&chip_info);
+    if (chip_info.revision > 0) {
+        stack_len = (MICROPY_TASK_STACK_SIZE_PSRAM / sizeof(StackType_t));
+    } else {
+        stack_len = (MICROPY_TASK_STACK_SIZE / sizeof(StackType_t));
+    }
+
+    // configure the antenna select switch here
     antenna_init0();
     config_init0();
     mpsleep_init0();
@@ -125,7 +145,7 @@ void TASK_Micropython (void *pvParameters) {
     // initialization that must not be repeted after a soft reset
     mptask_preinit();
 #if MICROPY_PY_THREAD
-    mp_thread_preinit(&mpTaskStack);
+    mp_thread_preinit(mpTaskStack, stack_len);
     mp_irq_preinit();
 #endif
 
@@ -134,14 +154,22 @@ void TASK_Micropython (void *pvParameters) {
 
     // the stack limit should be less than real stack size, so we have a chance
     // to recover from hiting the limit (the limit is measured in bytes)
-    mp_stack_set_limit(MICROPY_TASK_STACK_LEN - 1024);
+    mp_stack_set_limit(stack_len - 1024);
 
-    if (NULL == (gc_pool_upy = pvPortMalloc(GC_POOL_SIZE_BYTES))) {
+    if (esp_get_revision() > 0) {
+        gc_pool_size = GC_POOL_SIZE_BYTES_PSRAM;
+        gc_pool_upy = heap_caps_malloc(GC_POOL_SIZE_BYTES_PSRAM, MALLOC_CAP_SPIRAM);
+    } else {
+        gc_pool_size = GC_POOL_SIZE_BYTES;
+        gc_pool_upy = heap_caps_malloc(GC_POOL_SIZE_BYTES, MALLOC_CAP_INTERNAL);
+    }
+
+    if (NULL == gc_pool_upy) {
         printf("GC pool malloc failed!\n");
         for ( ; ; );
     }
 
-    alarm_preinit();
+    mach_timer_alarm_preinit();
     pin_preinit();
 
     wifi_on_boot = config_get_wifi_on_boot();
@@ -154,7 +182,7 @@ soft_reset:
 #endif
 
     // GC init
-    gc_init((void *)gc_pool_upy, (void *)(gc_pool_upy + GC_POOL_SIZE_BYTES));
+    gc_init((void *)gc_pool_upy, (void *)(gc_pool_upy + gc_pool_size));
 
     // MicroPython init
     mp_init();
@@ -185,13 +213,21 @@ soft_reset:
         safeboot = boot_info.safeboot;
     }
     if (!soft_reset) {
+        if (config_get_wdt_on_boot()) {
+            uint32_t timeout_ms = config_get_wdt_on_boot_timeout();
+            if (timeout_ms < 0xFFFFFFFF) {
+                printf("Starting the WDT on boot\n");
+                machine_wdt_start(timeout_ms);
+            }
+        }
         if (wifi_on_boot) {
             mptask_enable_wifi_ap();
         }
         // these ones are special because they need uPy running and they launch tasks
-#if defined(LOPY)
+#if defined(LOPY) || defined (LOPY4) || defined (FIPY)
         modlora_init0();
-#elif defined(SIPY)
+#endif
+#if defined(SIPY) || defined(LOPY4) || defined (FIPY)
         modsigfox_init0();
 #endif
     }
@@ -199,12 +235,12 @@ soft_reset:
     // initialize the serial flash file system
     mptask_init_sflash_filesystem();
 
-#if defined(LOPY) || defined(SIPY)
+#if defined(LOPY) || defined(SIPY) || defined (LOPY4) || defined(FIPY)
     // must be done after initializing the file system
     mptask_update_lpwan_mac_address();
 #endif
 
-#if defined(SIPY)
+#if defined(SIPY) || defined(LOPY4) || defined(FIPY)
     sigfox_update_id();
     sigfox_update_pac();
     sigfox_update_private_key();
@@ -225,6 +261,12 @@ soft_reset:
 
     pyexec_frozen_module("_boot.py");
 
+    if (!soft_reset) {
+    #if defined(GPY) || defined (FIPY)
+        modlte_init0();
+    #endif
+    }
+
     if (!safeboot) {
         // run boot.py
         int ret = pyexec_file("boot.py");
@@ -238,6 +280,9 @@ soft_reset:
     }
 
     if (!safeboot) {
+        // execute the frozen main first
+        pyexec_frozen_module("_main.py");
+
         // run the main script from the current directory.
         if (pyexec_mode_kind == PYEXEC_MODE_FRIENDLY_REPL) {
             const char *main_py;
@@ -282,6 +327,11 @@ soft_reset_exit:
     mp_printf(&mp_plat_print, "PYB: soft reboot\n");
     // it needs to be this one in order to not mess with the GIL
     ets_delay_us(5000);
+
+    uart_deinit_all();
+    // TODO: rmt_deinit_all();
+    rmt_deinit_rgb();
+
     soft_reset = true;
     goto soft_reset;
 }
@@ -290,9 +340,8 @@ soft_reset_exit:
  DEFINE PRIVATE FUNCTIONS
  ******************************************************************************/
 STATIC void mptask_preinit (void) {
-    mperror_pre_init();
     wlan_pre_init();
-    xTaskCreatePinnedToCore(TASK_Servers, "Servers", SERVERS_STACK_LEN, NULL, SERVERS_PRIORITY, NULL, 0);
+    xTaskCreatePinnedToCore(TASK_Servers, "Servers", SERVERS_STACK_LEN, NULL, SERVERS_PRIORITY, &svTaskHandle, 1);
 }
 
 STATIC void mptask_init_sflash_filesystem (void) {
@@ -358,7 +407,7 @@ STATIC void mptask_init_sflash_filesystem (void) {
     }
 }
 
-#if defined(LOPY) || defined(SIPY)
+#if defined(LOPY) || defined(SIPY) || defined (LOPY4) || defined(FIPY)
 STATIC void mptask_update_lpwan_mac_address (void) {
     #define LPWAN_MAC_ADDR_PATH          "/flash/sys/lpwan.mac"
 
@@ -389,8 +438,12 @@ STATIC void mptask_update_lpwan_mac_address (void) {
 #endif
 
 STATIC void mptask_enable_wifi_ap (void) {
-    wlan_setup (WIFI_MODE_AP, DEFAULT_AP_SSID, WIFI_AUTH_WPA2_PSK, DEFAULT_AP_PASSWORD,
-                DEFAULT_AP_CHANNEL, ANTENNA_TYPE_INTERNAL, true);
+	uint8_t wifi_ssid[32];
+	config_get_wifi_ssid(wifi_ssid);
+	uint8_t wifi_pwd[64];
+	config_get_wifi_pwd(wifi_pwd);
+    wlan_setup (WIFI_MODE_AP, (wifi_ssid[0]==0x00) ? DEFAULT_AP_SSID : (const char*) wifi_ssid , WIFI_AUTH_WPA2_PSK, (wifi_pwd[0]==0x00) ? DEFAULT_AP_PASSWORD : (const char*) wifi_pwd ,
+                DEFAULT_AP_CHANNEL, ANTENNA_TYPE_INTERNAL, (wifi_ssid[0]==0x00) ? true:false, false);
     mod_network_register_nic(&wlan_obj);
 }
 

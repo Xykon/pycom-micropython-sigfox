@@ -72,11 +72,10 @@ void SpiFrequency( Spi_t *obj, uint32_t hz );
  * \param [IN] outData Byte to be sent
  * \retval inData      Received byte.
  */
-#if defined(LOPY)
+#if defined(LOPY) || defined (LOPY4) || defined(FIPY)
 uint16_t SpiInOut( Spi_t *obj, uint16_t outData );
 #elif defined(SIPY)
-uint8_t SpiInOut(uint32_t spiNum, uint32_t outData );
-
+uint8_t SpiInOut(uint32_t spiNum, uint32_t outData);
 /*!
  * \brief Sends outData
  *
@@ -84,6 +83,8 @@ uint8_t SpiInOut(uint32_t spiNum, uint32_t outData );
  * \param [IN] outData Byte to be sent
  * \retval void
  */
+#endif
+#if defined(SIPY) || defined (LOPY4) || defined(FIPY)
 void SpiOut(uint32_t spiNum, uint32_t outData );
 #endif
 

@@ -41,7 +41,9 @@
 #include "py/mpstate.h"
 #include "py/gc.h"
 #include "py/mpthread.h"
-#include "mptask.h"
+
+#include "sdkconfig.h"
+#include "esp_system.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -69,7 +71,7 @@ STATIC mp_thread_mutex_t thread_mutex;
 STATIC thread_t thread_entry0;
 STATIC thread_t *thread; // root pointer, handled by mp_thread_gc_others
 
-void mp_thread_preinit(void *stack) {
+void mp_thread_preinit(void *stack, uint32_t stack_len) {
     mp_thread_set_state(&mp_state_ctx.thread);
     // create first entry in linked list of all threads
     thread = &thread_entry0;
@@ -77,7 +79,7 @@ void mp_thread_preinit(void *stack) {
     thread->ready = 1;
     thread->arg = NULL;
     thread->stack = stack;
-    thread->stack_len = MICROPY_TASK_STACK_LEN;
+    thread->stack_len = stack_len;
     thread->next = NULL;
 }
 
@@ -140,15 +142,36 @@ void mp_thread_create_ex(void *(*entry)(void*), void *arg, size_t *stack_size, i
         *stack_size = MP_THREAD_MIN_STACK_SIZE; // minimum stack size
     }
 
+    StaticTask_t *tcb;
+    StackType_t *stack;
+    thread_t *th;
+
     // allocate TCB, stack and linked-list node (must be outside thread_mutex lock)
-    StaticTask_t *tcb = m_new(StaticTask_t, 1);
-    StackType_t *stack = m_new(StackType_t, *stack_size / sizeof(StackType_t));
-    thread_t *th = m_new_obj(thread_t);
+    if (esp_get_revision() > 0) {
+        // for revision 1 devices we allocate from the internal memory of the malloc heap
+        tcb = heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!tcb) {
+            goto memory_error;
+        }
+        stack = heap_caps_malloc(*stack_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!stack) {
+            goto memory_error;
+        }
+        th = heap_caps_malloc(sizeof(thread_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!th) {
+            goto memory_error;
+        }
+    } else {
+        // for revision 0 devices we allocate from the MicroPython heap which is all in the internal memory
+        tcb = m_new(StaticTask_t, 1);
+        stack = m_new(StackType_t, *stack_size / sizeof(StackType_t));
+        th = m_new_obj(thread_t);
+    }
 
     mp_thread_mutex_lock(&thread_mutex, 1);
 
     // create thread
-    TaskHandle_t id = xTaskCreateStaticPinnedToCore(freertos_entry, name, *stack_size / sizeof(StackType_t), arg, priority, stack, tcb, 0);
+    TaskHandle_t id = xTaskCreateStaticPinnedToCore(freertos_entry, name, *stack_size / sizeof(StackType_t), arg, priority, stack, tcb, 1);
     if (id == NULL) {
         mp_thread_mutex_unlock(&thread_mutex);
         nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "can't create thread"));
@@ -168,6 +191,11 @@ void mp_thread_create_ex(void *(*entry)(void*), void *arg, size_t *stack_size, i
     thread = th;
 
     mp_thread_mutex_unlock(&thread_mutex);
+
+    return;
+
+memory_error:
+    nlr_raise(mp_obj_new_exception_msg(&mp_type_MemoryError, "can't create thread"));
 }
 
 void mp_thread_create(void *(*entry)(void*), void *arg, size_t *stack_size) {
@@ -198,13 +226,30 @@ void vPortCleanUpTCB (void *tcb) {
                 thread = th->next;
             }
             // explicitely release all its memory
-            m_del(StaticTask_t, th->tcb, 1);
-            m_del(StackType_t, th->stack, th->stack_len);
-            m_del(thread_t, th, 1);
+            if (esp_get_revision() > 0) {
+                free(th->tcb);
+                free(th->stack);
+                free(th);
+            } else {
+                m_del(StaticTask_t, th->tcb, 1);
+                m_del(StackType_t, th->stack, th->stack_len);
+                m_del(thread_t, th, 1);
+            }
             break;
         }
     }
     mp_thread_mutex_unlock(&thread_mutex);
+}
+
+mp_obj_thread_lock_t *mp_thread_new_thread_lock(void) {
+    mp_obj_thread_lock_t *self = m_new_obj(mp_obj_thread_lock_t);
+    self->mutex = heap_caps_malloc(sizeof(mp_thread_mutex_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (NULL == self->mutex) {
+        nlr_raise(mp_obj_new_exception_msg(&mp_type_MemoryError, "can't create lock"));
+    }
+    mp_thread_mutex_init(self->mutex);
+    self->locked = false;
+    return self;
 }
 
 void mp_thread_mutex_init(mp_thread_mutex_t *mutex) {

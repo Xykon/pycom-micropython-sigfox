@@ -45,6 +45,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "machrtc.h"
+
 /******************************************************************************
  DEFINE PRIVATE CONSTANTS
  ******************************************************************************/
@@ -52,16 +54,16 @@
 #define FTP_ACTIVE_DATA_PORT                20
 #define FTP_PASIVE_DATA_PORT                2024
 #define FTP_BUFFER_SIZE                     512
-#define FTP_TX_RETRIES_MAX                  25
+#define FTP_TX_RETRIES_MAX                  50
 #define FTP_CMD_SIZE_MAX                    6
 #define FTP_CMD_CLIENTS_MAX                 1
 #define FTP_DATA_CLIENTS_MAX                1
 #define FTP_MAX_PARAM_SIZE                  (MICROPY_ALLOC_PATH_MAX + 1)
-#define FTP_UNIX_TIME_20000101              946684800
-#define FTP_UNIX_TIME_20150101              1420070400
-#define FTP_UNIX_SECONDS_180_DAYS           15552000
+#define FTP_UNIX_TIME_20000101              946684800ll
+#define FTP_UNIX_TIME_20150101              1420070400ll
+#define FTP_UNIX_SECONDS_180_DAYS           15552000ll
 #define FTP_DATA_TIMEOUT_MS                 10000            // 10 seconds
-#define FTP_SOCKETFIFO_ELEMENTS_MAX         4
+#define FTP_SOCKETFIFO_ELEMENTS_MAX         5
 #define FTP_CYCLE_TIME_MS                   (SERVERS_CYCLE_TIME_MS * 2)
 
 /******************************************************************************
@@ -112,7 +114,7 @@ typedef struct {
     union {
         DIR             dp;
         FIL             fp;
-    };
+    }u;
     int32_t             lc_sd;
     int32_t             ld_sd;
     int32_t             c_sd;
@@ -187,6 +189,7 @@ static const ftp_month_t ftp_month[] = { { "Jan" }, { "Feb" }, { "Mar" }, { "Apr
 
 static SocketFifoElement_t ftp_fifoelements[FTP_SOCKETFIFO_ELEMENTS_MAX];
 static FIFO_t ftp_socketfifo;
+static uint32_t ftp_last_dir_idx;
 
 /******************************************************************************
  DECLARE PRIVATE FUNCTIONS
@@ -216,15 +219,16 @@ static void ftp_open_child (char *pwd, char *dir);
 static void ftp_close_child (char *pwd);
 static void ftp_return_to_previous_path (char *pwd, char *dir);
 
+
 /******************************************************************************
  DEFINE PUBLIC FUNCTIONS
  ******************************************************************************/
 void ftp_init (void) {
-    // Allocate memory for the data buffer, and the file system structs (from the RTOS heap)
-    ftp_data.dBuffer = pvPortMalloc(FTP_BUFFER_SIZE);
-    ftp_path = pvPortMalloc(FTP_MAX_PARAM_SIZE);
-    ftp_scratch_buffer = pvPortMalloc(FTP_MAX_PARAM_SIZE);
-    ftp_cmd_buffer = pvPortMalloc(FTP_MAX_PARAM_SIZE + FTP_CMD_SIZE_MAX);
+    // allocate memory for the data buffer, and the file system structs (from the RTOS heap)
+    ftp_data.dBuffer = heap_caps_malloc(FTP_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ftp_path = heap_caps_malloc(FTP_MAX_PARAM_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ftp_scratch_buffer = heap_caps_malloc(FTP_MAX_PARAM_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ftp_cmd_buffer = heap_caps_malloc(FTP_MAX_PARAM_SIZE + FTP_CMD_SIZE_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     SOCKETFIFO_Init (&ftp_socketfifo, (void *)ftp_fifoelements, FTP_SOCKETFIFO_ELEMENTS_MAX);
     ftp_data.c_sd  = -1;
     ftp_data.d_sd  = -1;
@@ -235,6 +239,7 @@ void ftp_init (void) {
     ftp_data.substate = E_FTP_STE_SUB_DISCONNECTED;
     ftp_data.special_file = false;
     ftp_data.volcount = 0;
+    ftp_last_dir_idx = 0;
 }
 
 void ftp_run (void) {
@@ -331,8 +336,7 @@ void ftp_run (void) {
                         ftp_send_reply(426, NULL);
                         ftp_data.state = E_FTP_STE_END_TRANSFER;
                     }
-                }
-                else {
+                } else {
                     if (ftp_data.special_file) {
                         ftp_data.special_file = false;
                         updater_finish();
@@ -508,7 +512,14 @@ static ftp_result_t ftp_wait_for_connection (int32_t l_sd, int32_t *n_sd, uint32
 }
 
 static ftp_result_t ftp_send_non_blocking (int32_t sd, void *data, int32_t Len) {
+    // make it blocking
+    uint32_t option = fcntl(sd, F_GETFL, 0);
+    option &= ~O_NONBLOCK;
+    fcntl(sd, F_SETFL, option);
     int32_t result = send(sd, data, Len, 0);
+    // make it non-blocking again
+    option |= O_NONBLOCK;
+    fcntl(sd, F_SETFL, option);
 
     if (result > 0) {
         ftp_data.txRetries = 0;
@@ -648,9 +659,9 @@ static void ftp_process_cmd (void) {
                 fres = FR_NO_PATH;
                 ftp_pop_param (&bufptr, ftp_scratch_buffer, false);
                 ftp_open_child (ftp_path, ftp_scratch_buffer);
-                if ((ftp_path[0] == '/' && ftp_path[1] == '\0') || ((fres = f_opendir (&ftp_data.dp, ftp_path)) == FR_OK)) {
+                if ((ftp_path[0] == '/' && ftp_path[1] == '\0') || ((fres = f_opendir (&ftp_data.u.dp, ftp_path)) == FR_OK)) {
                     if (fres == FR_OK) {
-                        f_closedir(&ftp_data.dp);
+                        f_closedir(&ftp_data.u.dp);
                     }
                     ftp_send_reply(250, NULL);
                 } else {
@@ -835,9 +846,9 @@ static void ftp_process_cmd (void) {
 
 static void ftp_close_files (void) {
     if (ftp_data.e_open == E_FTP_FILE_OPEN) {
-        f_close(&ftp_data.fp);
+        f_close(&ftp_data.u.fp);
     } else if (ftp_data.e_open == E_FTP_DIR_OPEN) {
-        f_closedir(&ftp_data.dp);
+        f_closedir(&ftp_data.u.dp);
     }
     ftp_data.e_open = E_FTP_NOTHING_OPEN;
 }
@@ -882,48 +893,60 @@ static void ftp_pop_param (char **str, char *param, bool stop_on_space) {
 }
 
 static int ftp_print_eplf_item (char *dest, uint32_t destsize, FILINFO *fno) {
-
     char *type = (fno->fattrib & AM_DIR) ? "d" : "-";
-    uint32_t tseconds;
+    uint64_t tseconds;
+    uint32_t _len;
     uint mindex = (((fno->fdate >> 5) & 0x0f) > 0) ? (((fno->fdate >> 5) & 0x0f) - 1) : 0;
     uint day = ((fno->fdate & 0x1f) > 0) ? (fno->fdate & 0x1f) : 1;
-    uint fseconds = timeutils_seconds_since_epoch(1980 + ((fno->fdate >> 9) & 0x7f),
+    uint64_t fseconds = timeutils_seconds_since_epoch(1980 + ((fno->fdate >> 9) & 0x7f),
                                                         (fno->fdate >> 5) & 0x0f,
                                                         fno->fdate & 0x1f,
                                                         (fno->ftime >> 11) & 0x1f,
                                                         (fno->ftime >> 5) & 0x3f,
                                                         2 * (fno->ftime & 0x1f));
-    tseconds = 3600; // pyb_rtc_get_seconds(); // FIXME
-    if (FTP_UNIX_SECONDS_180_DAYS < tseconds - fseconds) {
-        return snprintf(dest, destsize, "%srw-rw-r--   1 root  root %9u %s %2u %5u %s\r\n",
+
+    tseconds = mach_rtc_get_us_since_epoch() / 1000000ll;
+    if (FTP_UNIX_SECONDS_180_DAYS < (int64_t)(tseconds - fseconds)) {
+        _len = snprintf(dest, destsize, "%srw-rw-r--   1 root  root %9u %s %2u %5u %s\r\n",
                         type, (uint32_t)fno->fsize, ftp_month[mindex].month, day,
                         1980 + ((fno->fdate >> 9) & 0x7f), fno->fname);
     } else {
-        return snprintf(dest, destsize, "%srw-rw-r--   1 root  root %9u %s %2u %02u:%02u %s\r\n",
+        _len = snprintf(dest, destsize, "%srw-rw-r--   1 root  root %9u %s %2u %02u:%02u %s\r\n",
                         type, (uint32_t)fno->fsize, ftp_month[mindex].month, day,
                         (fno->ftime >> 11) & 0x1f, (fno->ftime >> 5) & 0x3f, fno->fname);
     }
+
+    if (_len > 0 && _len < destsize) {
+        return _len;
+    }
+    return 0;
 }
 
 static int ftp_print_eplf_drive (char *dest, uint32_t destsize, char *name) {
     timeutils_struct_time_t tm;
-    uint32_t tseconds;
+    uint64_t tseconds;
     char *type = "d";
+    uint32_t _len;
 
     timeutils_seconds_since_epoch_to_struct_time((FTP_UNIX_TIME_20150101 - FTP_UNIX_TIME_20000101), &tm);
 
-    tseconds = 3600; // pyb_rtc_get_seconds(); // FIXME
-    if (FTP_UNIX_SECONDS_180_DAYS < tseconds - (FTP_UNIX_TIME_20150101 - FTP_UNIX_TIME_20000101)) {
-        return snprintf(dest, destsize, "%srw-rw-r--   1 root  root %9u %s %2u %5u %s\r\n",
+    tseconds = mach_rtc_get_us_since_epoch() / 1000000ll;
+    if (FTP_UNIX_SECONDS_180_DAYS < (int64_t)(tseconds - (int64_t)(FTP_UNIX_TIME_20150101 - FTP_UNIX_TIME_20000101))) {
+        _len = snprintf(dest, destsize, "%srw-rw-r--   1 root  root %9u %s %2u %5u %s\r\n",
                         type, 0, ftp_month[(tm.tm_mon - 1)].month, tm.tm_mday, tm.tm_year, name);
     } else {
-        return snprintf(dest, destsize, "%srw-rw-r--   1 root  root %9u %s %2u %02u:%02u %s\r\n",
+        _len = snprintf(dest, destsize, "%srw-rw-r--   1 root  root %9u %s %2u %02u:%02u %s\r\n",
                         type, 0, ftp_month[(tm.tm_mon - 1)].month, tm.tm_mday, tm.tm_hour, tm.tm_min, name);
     }
+
+    if (_len > 0 && _len < destsize) {
+        return _len;
+    }
+    return 0;
 }
 
 static bool ftp_open_file (const char *path, int mode) {
-    FRESULT res = f_open(&ftp_data.fp, path, mode);
+    FRESULT res = f_open(&ftp_data.u.fp, path, mode);
     if (res != FR_OK) {
         return false;
     }
@@ -933,7 +956,7 @@ static bool ftp_open_file (const char *path, int mode) {
 
 static ftp_result_t ftp_read_file (char *filebuf, uint32_t desiredsize, uint32_t *actualsize) {
     ftp_result_t result = E_FTP_RESULT_CONTINUE;
-    FRESULT res = f_read(&ftp_data.fp, filebuf, desiredsize, (UINT *)actualsize);
+    FRESULT res = f_read(&ftp_data.u.fp, filebuf, desiredsize, (UINT *)actualsize);
     if (res != FR_OK) {
         ftp_close_files();
         result = E_FTP_RESULT_FAILED;
@@ -948,7 +971,7 @@ static ftp_result_t ftp_read_file (char *filebuf, uint32_t desiredsize, uint32_t
 static ftp_result_t ftp_write_file (char *filebuf, uint32_t size) {
     ftp_result_t result = E_FTP_RESULT_FAILED;
     uint32_t actualsize;
-    FRESULT res = f_write(&ftp_data.fp, filebuf, size, (UINT *)&actualsize);
+    FRESULT res = f_write(&ftp_data.u.fp, filebuf, size, (UINT *)&actualsize);
     if ((actualsize == size) && (FR_OK == res)) {
         result = E_FTP_RESULT_OK;
     } else {
@@ -963,7 +986,7 @@ static ftp_result_t ftp_open_dir_for_listing (const char *path) {
         ftp_data.listroot = true;
     } else {
         FRESULT res;
-        res = f_opendir(&ftp_data.dp, path);                       /* Open the directory */
+        res = f_opendir(&ftp_data.u.dp, path);                       /* Open the directory */
         if (res != FR_OK) {
             return E_FTP_RESULT_FAILED;
         }
@@ -975,23 +998,38 @@ static ftp_result_t ftp_open_dir_for_listing (const char *path) {
 
 static ftp_result_t ftp_list_dir (char *list, uint32_t maxlistsize, uint32_t *listsize) {
     uint next = 0;
-    uint listcount = 0;
+    uint32_t _len;
     FRESULT res;
     ftp_result_t result = E_FTP_RESULT_CONTINUE;
     FILINFO fno;
 
-    // read up to 8 directory items
-    while (listcount < 8) {
+    // if we are resuming an incomplete list operation, go back to the item we left behind
+    if (!ftp_data.listroot) {
+        for (int i = 0; i < ftp_last_dir_idx; i++) {
+            f_readdir(&ftp_data.u.dp, &fno);
+        }
+    }
+
+    // read until we get all items are there's no more space in the buffer
+    while (true) {
         if (ftp_data.listroot) {
             // root directory "hack"
             if (0 == ftp_data.volcount) {
-                next += ftp_print_eplf_drive((list + next), (maxlistsize - next), "flash");
+                _len = ftp_print_eplf_drive((list + next), (maxlistsize - next - 1), "flash");
+                if (!_len) {    // no space available
+                    break;
+                }
+                next += _len;
             } else if (ftp_data.volcount <= MP_STATE_PORT(mount_obj_list).len) {
                 os_fs_mount_t *mount_obj = ((os_fs_mount_t *)(MP_STATE_PORT(mount_obj_list).items[(ftp_data.volcount - 1)]));
-                next += ftp_print_eplf_drive((list + next), (maxlistsize - next), (char *)&mount_obj->path[1]);
+                _len = ftp_print_eplf_drive((list + next), (maxlistsize - next - 1), (char *)&mount_obj->path[1]);
+                if (!_len) {    // no space available
+                    break;
+                }
+                next += _len;
             } else {
                 if (!next) {
-                    // no volume found this time, we are done
+                    // no volumes found this time, we are done
                     ftp_data.volcount = 0;
                 }
                 break;
@@ -999,7 +1037,7 @@ static ftp_result_t ftp_list_dir (char *list, uint32_t maxlistsize, uint32_t *li
             ftp_data.volcount++;
         } else {
             // a "normal" directory
-            res = f_readdir(&ftp_data.dp, &fno);                                                       /* Read a directory item */
+            res = f_readdir(&ftp_data.u.dp, &fno);                                                       /* Read a directory item */
             if (res != FR_OK || fno.fname[0] == 0) {
                 result = E_FTP_RESULT_OK;
                 break;                                                                                 /* Break on error or end of dp */
@@ -1007,13 +1045,21 @@ static ftp_result_t ftp_list_dir (char *list, uint32_t maxlistsize, uint32_t *li
             if (fno.fname[0] == '.' && fno.fname[1] == 0) continue;                                    /* Ignore . entry */
             if (fno.fname[0] == '.' && fno.fname[1] == '.' && fno.fname[2] == 0) continue;             /* Ignore .. entry */
 
-            // add the entry to the list
-            next += ftp_print_eplf_item((list + next), (maxlistsize - next), &fno);
+            // add the entry to the list if space is available
+            _len = ftp_print_eplf_item((list + next), (maxlistsize - next - 1), &fno);
+            if (!_len) {
+                // close and open again, we will resume in the next iteration
+                ftp_close_files();
+                ftp_open_dir_for_listing(ftp_path);
+                break;
+            }
+            next += _len;
+            ftp_last_dir_idx++;
         }
-        listcount++;
     }
     if (result == E_FTP_RESULT_OK) {
         ftp_close_files();
+        ftp_last_dir_idx = 0;
     }
     *listsize = next;
     return result;
@@ -1059,4 +1105,3 @@ static void ftp_return_to_previous_path (char *pwd, char *dir) {
         }
     }
 }
-

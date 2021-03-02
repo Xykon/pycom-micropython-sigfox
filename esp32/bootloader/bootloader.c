@@ -19,10 +19,12 @@
 
 #include "bootloader.h"
 #include "esp_attr.h"
+//#define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
 #include "esp_system.h"
 
 #include "rom/cache.h"
+#include "rom/efuse.h"
 #include "rom/ets_sys.h"
 #include "rom/spi_flash.h"
 #include "rom/crc.h"
@@ -45,16 +47,24 @@
 #include "sdkconfig.h"
 #include "mpconfigboard.h"
 #include "esp_image_format.h"
+#include "esp_secure_boot.h"
+#include "esp_flash_encrypt.h"
 #include "esp_flash_partitions.h"
 #include "bootloader_flash.h"
 #include "bootmgr.h"
 #include "bootloader_random.h"
+#include "bootloader_clock.h"
 
 #include "flash_qio_mode.h"
 #include "mperror.h"
 
+
+#define MAP_ERR_MSG "Image contains multiple %s segments. Only the last one will be mapped."
+
 extern int _bss_start;
 extern int _bss_end;
+extern int _data_start;
+extern int _data_end;
 
 static const char* TAG = "boot";
 
@@ -69,7 +79,7 @@ flash cache is down and the app CPU is in reset. We do have a stack, so we can d
 extern __attribute__((noreturn)) void mperror_fatal_error (void);
 
 static void bootloader_main();
-static void unpack_load_app(const esp_partition_pos_t *app_node);
+static void unpack_load_app(const esp_image_metadata_t* data);
 static void print_flash_info(const esp_image_header_t* pfhdr);
 static void set_cache_and_start_app(uint32_t drom_addr,
     uint32_t drom_load_addr,
@@ -79,26 +89,43 @@ static void set_cache_and_start_app(uint32_t drom_addr,
     uint32_t irom_size,
     uint32_t entry_addr);
 static void update_flash_config(const esp_image_header_t* pfhdr);
-static void clock_configure(void);
+static void vddsdio_configure();
+static void flash_gpio_configure();
 static void uart_console_configure(void);
 static void wdt_reset_check(void);
 
-static void read_mac(uint8_t* mac)
-{
-    uint32_t mac_low = REG_READ(EFUSE_BLK0_RDATA1_REG);
-    uint32_t mac_high = REG_READ(EFUSE_BLK0_RDATA2_REG);
+// static void read_mac(uint8_t* mac)
+// {
+//     uint32_t mac_low = REG_READ(EFUSE_BLK0_RDATA1_REG);
+//     uint32_t mac_high = REG_READ(EFUSE_BLK0_RDATA2_REG);
 
-    mac[0] = mac_high >> 8;
-    mac[1] = mac_high;
-    mac[2] = mac_low >> 24;
-    mac[3] = mac_low >> 16;
-    mac[4] = mac_low >> 8;
-    mac[5] = mac_low;
-}
+//     mac[0] = mac_high >> 8;
+//     mac[1] = mac_high;
+//     mac[2] = mac_low >> 24;
+//     mac[3] = mac_low >> 16;
+//     mac[4] = mac_low >> 8;
+//     mac[5] = mac_low;
+// }
 
-void IRAM_ATTR call_start_cpu0()
+/*
+ * We arrive here after the ROM bootloader finished loading this second stage bootloader from flash.
+ * The hardware is mostly uninitialized, flash cache is down and the app CPU is in reset.
+ * We do have a stack, so we can do the initialization in C.
+ */
+void call_start_cpu0()
 {
     cpu_configure_region_protection();
+
+    /* Sanity check that static RAM is after the stack */
+#ifndef NDEBUG
+    {
+        int *sp = get_sp();
+        assert(&_bss_start <= &_bss_end);
+        assert(&_data_start <= &_data_end);
+        assert(sp < &_bss_start);
+        assert(sp < &_data_start);
+    }
+#endif
 
     //Clear bss
     memset(&_bss_start, 0, (&_bss_end - &_bss_start) * sizeof(_bss_start));
@@ -129,14 +156,14 @@ void IRAM_ATTR call_start_cpu0()
     bootloader_main();
 }
 
-/**
- *  @function :     load_partition_table
- *  @description:   Parse partition table, get useful data such as location of
- *                  OTA info sector, factory app sector, and test app sector.
+
+/** @brief Load partition table
  *
- *  @inputs:        bs     bootloader state structure used to save the data
- *  @return:        return true, if the partition table is loaded (and MD5 checksum is valid)
+ *  Parse partition table, get useful data such as location of
+ *  OTA data partition, factory app partition, and test app partition.
  *
+ *  @param         bs     bootloader state structure used to save read data
+ *  @return        return true if the partition table was succesfully loaded and MD5 checksum is valid.
  */
 bool load_partition_table(bootloader_state_t* bs)
 {
@@ -146,6 +173,17 @@ bool load_partition_table(bootloader_state_t* bs)
     esp_err_t err;
     int num_partitions;
 
+#ifdef CONFIG_SECURE_BOOT_ENABLED
+    if(esp_secure_boot_enabled()) {
+        ESP_LOGI(TAG, "Verifying partition table signature...");
+        err = esp_secure_boot_verify_signature(ESP_PARTITION_TABLE_ADDR, ESP_PARTITION_TABLE_DATA_LEN);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to verify partition table signature.");
+            return false;
+        }
+        ESP_LOGD(TAG, "Partition table signature verified");
+    }
+#endif
 
     partitions = bootloader_mmap(ESP_PARTITION_TABLE_ADDR, ESP_PARTITION_TABLE_DATA_LEN);
     if (!partitions) {
@@ -234,99 +272,9 @@ static bool ota_select_valid(const boot_info_t *s)
     return s->Status != UINT32_MAX && s->crc == _crc;
 }
 
-void md5_to_ascii(unsigned char *md5, unsigned char *hex) {
-    #define nibble2ascii(x) ((x) < 10 ? (x) + '0' : (x) - 10 + 'a')
-
-    for (int i = 0; i < 16; i++) {
-        hex[(i * 2)] = nibble2ascii(md5[i] >> 4);
-        hex[(i * 2) + 1] = nibble2ascii(md5[i] & 0xF);
-    }
-}
-
-// must be 32-bit aligned
-static uint32_t bootloader_buf[1024];
-
-static IRAM_ATTR void calculate_signature (uint8_t *signature) {
-    uint32_t total_len = 0;
-    uint8_t mac[6];
-    read_mac(mac);
-
-    struct MD5Context md5_context;
-
-    ESP_LOGI(TAG, "Starting signature calculation");
-
-    MD5Init(&md5_context);
-    ESP_LOGI(TAG, "md5 init sig");
-    while (total_len < 0x7000) {
-        // Cache_Read_Disable(0);
-        if (ESP_ROM_SPIFLASH_RESULT_OK != bootloader_flash_read(0x1000 + total_len, (void *)bootloader_buf, SPI_SEC_SIZE, false)) {
-            ESP_LOGE(TAG, SPI_ERROR_LOG);
-            // Cache_Read_Enable(0);
-            return;
-        }
-        // Cache_Read_Enable(0);
-        total_len += SPI_SEC_SIZE;
-        MD5Update(&md5_context, (void *)bootloader_buf, SPI_SEC_SIZE);
-    }
-    // add the mac address
-    MD5Update(&md5_context, (void *)mac, sizeof(mac));
-    MD5Final(signature, &md5_context);
-}
-
-static IRAM_ATTR bool bootloader_verify (const esp_partition_pos_t *pos, uint32_t size) {
-    uint32_t total_len = 0, read_len;
-    uint8_t hash[16];
-    uint8_t hash_hex[33];
-    struct MD5Context md5_context;
-
-    ESP_LOGI(TAG, "Starting image verification %x %d", pos->offset, size);
-
-    size -= 32; // substract the lenght of the MD5 hash
-
-    MD5Init(&md5_context);
-    ESP_LOGI(TAG, "md5 init");
-    while (total_len < size) {
-        read_len = (size - total_len) > SPI_SEC_SIZE ? SPI_SEC_SIZE : (size - total_len);
-        // Cache_Read_Disable(0);
-        if (ESP_OK != bootloader_flash_read(pos->offset + total_len, (void *)bootloader_buf, SPI_SEC_SIZE, false)) {
-            ESP_LOGE(TAG, SPI_ERROR_LOG);
-            // Cache_Read_Enable(0);
-            return false;
-        }
-        // Cache_Read_Enable(0);
-        total_len += read_len;
-        MD5Update(&md5_context, (void *)bootloader_buf, read_len);
-    }
-    ESP_LOGI(TAG, "Reading done total len=%d", total_len);
-    MD5Final(hash, &md5_context);
-
-    ESP_LOGI(TAG, "Hash calculated");
-    md5_to_ascii(hash, hash_hex);
-    ESP_LOGI(TAG, "Converted to hex");
-
-    // Cache_Read_Disable(0);
-    if (ESP_OK != bootloader_flash_read(pos->offset + total_len, (void *)bootloader_buf, SPI_SEC_SIZE, false)) {
-        ESP_LOGE(TAG, SPI_ERROR_LOG);
-        // Cache_Read_Enable(0);
-        return false;
-    }
-    // Cache_Read_Enable(0);
-
-    hash_hex[32] = '\0';
-    // this one is uint32_t type, remember?
-    bootloader_buf[32 / sizeof(uint32_t)] = '\0';
-    // compare both hashes
-    if (!strcmp((const char *)hash_hex, (const char *)bootloader_buf)) {
-        ESP_LOGI(TAG, "MD5 hash OK!");
-        // it's a match
-        return true;
-    }
-
-    ESP_LOGI(TAG, "MD5 hash failed %s : %s", hash_hex, bootloader_buf);
-    return false;
-}
-
 static IRAM_ATTR bool ota_write_boot_info (boot_info_t *boot_info, uint32_t offset) {
+	esp_rom_spiflash_result_t write_result;
+
     boot_info->crc = ota_select_crc(boot_info);
     Cache_Read_Disable(0);
     if (ESP_ROM_SPIFLASH_RESULT_OK != esp_rom_spiflash_erase_sector(offset / 0x1000)) {
@@ -335,7 +283,17 @@ static IRAM_ATTR bool ota_write_boot_info (boot_info_t *boot_info, uint32_t offs
         return false;
     }
 
-    if (ESP_ROM_SPIFLASH_RESULT_OK != esp_rom_spiflash_write(offset, (void *)boot_info, sizeof(boot_info_t))) {
+    if (esp_flash_encryption_enabled()) {
+    		// if flash is encrypted, then Write is done 32B chunks
+		uint8_t buff[64] __attribute__((aligned (32)));
+		memcpy(buff, (void *)boot_info, sizeof(boot_info_t));
+		write_result = esp_rom_spiflash_write_encrypted(offset, (void *)boot_info, 64);
+    }
+    else {
+    		write_result = esp_rom_spiflash_write(offset, (void *)boot_info, sizeof(boot_info_t));
+    }
+
+    if (ESP_ROM_SPIFLASH_RESULT_OK != write_result) {
         ESP_LOGE(TAG, SPI_ERROR_LOG);
         Cache_Read_Enable(0);
         return false;
@@ -343,6 +301,139 @@ static IRAM_ATTR bool ota_write_boot_info (boot_info_t *boot_info, uint32_t offs
     Cache_Read_Enable(0);
     return true;
 }
+
+
+/* Return true if a partition has a valid app image that was successfully loaded */
+static bool get_image_from_partition(const esp_partition_pos_t *partition, esp_image_metadata_t *data)
+{
+    if (partition->size == 0) {
+        ESP_LOGD(TAG, "Can't boot from zero-length partition");
+        return false;
+    }
+
+    if (esp_image_load(ESP_IMAGE_LOAD, partition, data) == ESP_OK) {
+        ESP_LOGI(TAG, "Loaded app from partition at offset 0x%x",
+                 partition->offset);
+        return true;
+    }
+
+    return false;
+}
+
+static bool find_active_image(bootloader_state_t *bs, esp_partition_pos_t *partition)
+{
+    boot_info_t *boot_info;
+    boot_info_t _boot_info;
+
+    if (bs->ota_info.size < 2 * sizeof(esp_ota_select_entry_t)) {
+        ESP_LOGE(TAG, "ERROR: ota_info partition size %d is too small (minimum %d bytes)", bs->ota_info.size, sizeof(esp_ota_select_entry_t));
+        return false;
+    }
+    ESP_LOGI(TAG, "Loading boot info");
+    boot_info = (boot_info_t *)bootloader_mmap(bs->ota_info.offset, bs->ota_info.size);
+    if (!boot_info) {
+        ESP_LOGE(TAG, "bootloader_mmap(0x%x, 0x%x) failed", bs->ota_info.offset, bs->ota_info.size);
+        return false;
+    }
+    memcpy(&_boot_info, boot_info, sizeof(boot_info_t));
+    bootloader_munmap(boot_info);
+    boot_info = &_boot_info;
+    mperror_init0();
+
+    // // check the signature fot he bootloader first
+    // uint8_t signature[16];
+    // calculate_signature(signature);
+    // if (!memcmp(boot_info->signature, empty_signature, sizeof(boot_info->signature))) {
+    //     ESP_LOGI(TAG, "Writing the signature");
+    //     // write the signature
+    //     memcpy(boot_info->signature, signature, sizeof(boot_info->signature));
+    //     if (!ota_write_boot_info (boot_info, bs->ota_info.offset)) {
+    //         ESP_LOGE(TAG, "Error writing boot info");
+    //         mperror_fatal_error();
+    //         return false;
+    //     }
+    // } else {
+    //     ESP_LOGI(TAG, "Comparing the signature");
+    //     // compare the signatures
+    //     if (memcmp(boot_info->signature, signature, sizeof(boot_info->signature))) {
+    //         // signature check failed, don't load the app!
+    //         mperror_fatal_error();
+    //         return false;
+    //     }
+    // }
+
+    if (!ota_select_valid(boot_info)) {
+        ESP_LOGI(TAG, "Initializing OTA partition info");
+        // init status flash
+        memcpy(partition, &bs->image[0], sizeof(esp_partition_pos_t));
+        boot_info->ActiveImg = IMG_ACT_FACTORY;
+        boot_info->Status = IMG_STATUS_READY;
+        boot_info->PrevImg = IMG_ACT_FACTORY;
+        boot_info->safeboot = false;
+        if (!ota_write_boot_info (boot_info, bs->ota_info.offset)) {
+            ESP_LOGE(TAG, "Error writing boot info");
+            mperror_fatal_error();
+            return false;
+        }
+        return true;
+    } else {
+        // CRC is fine, check here the image that we need to load based on the status (ready or check)
+        // if image is in status check then we must verify the MD5, and set the new status
+        // if the MD5 fails, then we roll back to the previous image
+
+        // do we have a new image that needs to be verified?
+        if ((boot_info->ActiveImg != IMG_ACT_FACTORY) && (boot_info->Status == IMG_STATUS_CHECK)) {
+            if (boot_info->ActiveImg == IMG_ACT_UPDATE2) {
+                boot_info->ActiveImg = IMG_ACT_FACTORY;    // we only have space for 1 OTA image
+            }
+
+            // verify the active image (ota partition)
+            esp_image_metadata_t data;
+            if (ESP_OK != esp_image_load(ESP_IMAGE_VERIFY, &bs->image[boot_info->ActiveImg], &data)) {
+            		ESP_LOGD(TAG, "Switch to the previous image");
+            		// switch to the previous image
+                boot_info->ActiveImg = boot_info->PrevImg;
+                boot_info->PrevImg = IMG_ACT_FACTORY;
+            }
+
+            // in any case, change the status to "READY"
+            boot_info->Status = IMG_STATUS_READY;
+            // write the new boot info
+            if (!ota_write_boot_info (boot_info, bs->ota_info.offset)) {
+                ESP_LOGE(TAG, "Error writing boot info");
+                mperror_fatal_error();
+                return false;
+            }
+        }
+
+        // this one might modify the boot info hence it MUST be called after
+        // bootmgr_verify! (so that the changes are not saved to flash)
+        ESP_LOGI(TAG, "Checking safe boot pin");
+        uint32_t ActiveImg = boot_info->ActiveImg;
+        uint32_t safeboot = wait_for_safe_boot (boot_info, &ActiveImg);
+        if (safeboot > 0) {
+            ESP_LOGI(TAG, "Safe boot requested!");
+        }
+        if (safeboot != boot_info->safeboot) {
+            if (boot_info->safeboot == SAFE_BOOT_SW) {
+                boot_info->safeboot = SAFE_BOOT_HW;
+            } else {
+                boot_info->safeboot = safeboot;
+            }
+            // write the new boot info
+            if (!ota_write_boot_info (boot_info, bs->ota_info.offset)) {
+                ESP_LOGE(TAG, "Error writing boot info");
+                mperror_fatal_error();
+                return false;
+            }
+        }
+
+        // load the selected active image
+        memcpy(partition, &bs->image[ActiveImg], sizeof(esp_partition_pos_t));
+        return true;
+    }
+}
+
 
 /**
  *  @function :     bootloader_main
@@ -353,17 +444,21 @@ static IRAM_ATTR bool ota_write_boot_info (boot_info_t *boot_info, uint32_t offs
 
 static void bootloader_main()
 {
-    clock_configure();
+    vddsdio_configure();
+    flash_gpio_configure();
+    bootloader_clock_configure();
     uart_console_configure();
+    ESP_LOGI(TAG, "ESP-IDF 2nd stage bootloader");
     wdt_reset_check();
-    ESP_LOGI(TAG, "ESP-IDF %s 2nd stage bootloader");
+#if defined(CONFIG_SECURE_BOOT_ENABLED) || defined(CONFIG_FLASH_ENCRYPTION_ENABLED)
+    esp_err_t err;
+#endif
+    esp_image_header_t fhdr __attribute__((aligned (4)));
+    bootloader_state_t bootloader_state __attribute__((aligned (4)));
+    esp_partition_pos_t partition __attribute__((aligned (4)));
+    esp_image_metadata_t image_data __attribute__((aligned (4)));
 
-    esp_image_header_t fhdr;
-    bootloader_state_t bs;
-    uint32_t chip_revision = 0;
-
-    memset(&bs, 0, sizeof(bs));
-
+    memset(&bootloader_state, 0, sizeof(bootloader_state));
     ets_set_appcpu_boot_addr(0);
 
     /* disable watch dog here */
@@ -387,161 +482,74 @@ static void bootloader_main()
     bootloader_enable_qio_mode();
 #endif
 
-    if(esp_image_load_header(0x1000, true, &fhdr) != ESP_OK) {
+    if (bootloader_flash_read(ESP_BOOTLOADER_OFFSET, &fhdr,
+                              sizeof(esp_image_header_t), true) != ESP_OK) {
         ESP_LOGE(TAG, "failed to load bootloader header!");
         return;
     }
 
-    print_flash_info(&fhdr);
+    // force 4MB flash size for all boards
+    fhdr.spi_size = ESP_IMAGE_FLASH_SIZE_4MB;
 
+    print_flash_info(&fhdr);
     update_flash_config(&fhdr);
 
-    uint32_t reg = REG_READ(EFUSE_BLK0_RDATA3_REG);
-    if ((reg & EFUSE_RD_CHIP_VER_REV1_M) != 0) {
-        chip_revision = 1;
-    }
-
-    if (!load_partition_table(&bs)) {
+    if (!load_partition_table(&bootloader_state)) {
         ESP_LOGE(TAG, "load partition table error!");
         return;
     }
 
-    esp_partition_pos_t load_part_pos;
-
-    boot_info_t *boot_info;
-    boot_info_t _boot_info;
-
-    if (bs.ota_info.offset != 0) {              // check if partition table has OTA info partition
-        if (bs.ota_info.size < 2 * sizeof(esp_ota_select_entry_t)) {
-            ESP_LOGE(TAG, "ERROR: ota_info partition size %d is too small (minimum %d bytes)", bs.ota_info.size, sizeof(esp_ota_select_entry_t));
-            return;
-        }
-        ESP_LOGI(TAG, "Loading boot info");
-        boot_info = (boot_info_t *)bootloader_mmap(bs.ota_info.offset, bs.ota_info.size);
-        if (!boot_info) {
-            ESP_LOGE(TAG, "bootloader_mmap(0x%x, 0x%x) failed", bs.ota_info.offset, bs.ota_info.size);
-            return;
-        }
-        memcpy(&_boot_info, boot_info, sizeof(boot_info_t));
-        bootloader_munmap(boot_info);
-        boot_info = &_boot_info;
-        mperror_init0();
-        if (!ota_select_valid(boot_info)) {
-            ESP_LOGI(TAG, "Initializing OTA partition info");
-            // init status flash
-            load_part_pos = bs.image[0];
-            boot_info->ActiveImg = IMG_ACT_FACTORY;
-            boot_info->Status = IMG_STATUS_READY;
-            boot_info->PrevImg = IMG_ACT_FACTORY;
-            boot_info->safeboot = false;
-            if (!ota_write_boot_info (boot_info, bs.ota_info.offset)) {
-                ESP_LOGE(TAG, "Error writing boot info");
-                mperror_fatal_error();
-                return;
-            }
-        } else {
-            // CRC is fine, check here the image that we need to load based on the status (ready or check)
-            // if image is in status check then we must verify the MD5, and set the new status
-            // if the MD5 fails, then we roll back to the previous image
-
-            // do we have a new image that needs to be verified?
-            if ((boot_info->ActiveImg != IMG_ACT_FACTORY) && (boot_info->Status == IMG_STATUS_CHECK)) {
-                if (chip_revision == 0) {
-                    if (boot_info->ActiveImg == IMG_ACT_UPDATE2) {
-                        boot_info->ActiveImg = IMG_ACT_FACTORY;    // we only have space for 1 OTAA image
-                    }
-                }
-                if (!bootloader_verify(&bs.image[boot_info->ActiveImg], boot_info->size)) {
-                    // switch to the previous image
-                    boot_info->ActiveImg = boot_info->PrevImg;
-                    boot_info->PrevImg = IMG_ACT_FACTORY;
-                }
-                // in any case, change the status to "READY"
-                boot_info->Status = IMG_STATUS_READY;
-                // write the new boot info
-                if (!ota_write_boot_info (boot_info, bs.ota_info.offset)) {
-                    ESP_LOGE(TAG, "Error writing boot info");
-                    mperror_fatal_error();
-                    return;
-                }
-            }
-
-            // this one might modify the boot info hence it MUST be called after
-            // bootmgr_verify! (so that the changes are not saved to flash)
-            ESP_LOGI(TAG, "Checking safe boot pin");
-            uint32_t ActiveImg = boot_info->ActiveImg;
-            uint32_t safeboot = wait_for_safe_boot (boot_info, &ActiveImg);
-            if (safeboot) {
-                ESP_LOGI(TAG, "Safe boot requested!");
-            }
-            if (safeboot != boot_info->safeboot) {
-                boot_info->safeboot = safeboot;
-                // write the new boot info
-                if (!ota_write_boot_info (boot_info, bs.ota_info.offset)) {
-                    ESP_LOGE(TAG, "Error writing boot info");
-                    mperror_fatal_error();
-                    return;
-                }
-            }
-
-            // load the selected active image
-            load_part_pos = bs.image[ActiveImg];
-        }
-    } else {                                    // nothing to load, bail out
+    // check if the partition table has OTA info partition
+    if (bootloader_state.ota_info.offset == 0 || !find_active_image(&bootloader_state, &partition)) {
+        // nothing to load, bail out
         ESP_LOGE(TAG, "nothing to load");
         mperror_fatal_error();
         return;
     }
 
-    // check the signature
-    uint8_t signature[16];
-    calculate_signature(signature);
-    if (!memcmp(boot_info->signature, empty_signature, sizeof(boot_info->signature))) {
-        ESP_LOGI(TAG, "Writing the signature");
-        // write the signature
-        memcpy(boot_info->signature, signature, sizeof(boot_info->signature));
-        if (!ota_write_boot_info (boot_info, bs.ota_info.offset)) {
-            ESP_LOGE(TAG, "Error writing boot info");
-            mperror_fatal_error();
-            return;
-        }
-    } else {
-        ESP_LOGI(TAG, "Comparing the signature");
-        // compare the signatures
-        if (memcmp(boot_info->signature, signature, sizeof(boot_info->signature))) {
-            // signature check failed, don't load the app!
-            mperror_fatal_error();
-            return;
-        }
+    get_image_from_partition(&partition, &image_data);
+
+#ifdef CONFIG_SECURE_BOOT_ENABLED
+    // Generate secure digest from this bootloader to protect future modifications
+    ESP_LOGI(TAG, "Checking secure boot...");
+    err = esp_secure_boot_permanently_enable();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Bootloader digest generation failed (%d). SECURE BOOT IS NOT ENABLED.", err);
+        // Stop booting, as this could next Encrypt the whole Flash
+        return;
     }
+#endif
+
+#ifdef CONFIG_FLASH_ENCRYPTION_ENABLED
+    // encrypt flash
+    ESP_LOGI(TAG, "Checking flash encryption...");
+    bool flash_encryption_enabled = esp_flash_encryption_enabled();
+    err = esp_flash_encrypt_check_and_update();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Flash encryption check failed (%d).", err);
+        return;
+    }
+
+    if (!flash_encryption_enabled && esp_flash_encryption_enabled()) {
+        /* Flash encryption was just enabled for the first time,
+           so issue a system reset to ensure flash encryption
+           cache resets properly */
+        ESP_LOGI(TAG, "Resetting with flash encryption enabled...");
+        REG_WRITE(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_SW_SYS_RST);
+        return;
+    }
+#endif
 
     ESP_LOGI(TAG, "Disabling RNG early entropy source...");
     bootloader_random_disable();
 
     // copy loaded segments to RAM, set up caches for mapped segments, and start application
-    ESP_LOGI(TAG, "Loading app partition at offset %08x", load_part_pos.offset);
-    unpack_load_app(&load_part_pos);
+    ESP_LOGI(TAG, "Loading app partition at offset %08x", partition.offset);
+    unpack_load_app(&image_data);
 }
 
-
-static void unpack_load_app(const esp_partition_pos_t* partition)
+static void unpack_load_app(const esp_image_metadata_t* data)
 {
-    esp_err_t err;
-    esp_image_header_t image_header;
-    uint32_t image_length;
-
-    /* TODO: verify the app image as part of OTA boot decision, so can have fallbacks */
-    err = esp_image_basic_verify(partition->offset, true, &image_length);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to verify app image @ 0x%x (%d)", partition->offset, err);
-        return;
-    }
-
-    if (esp_image_load_header(partition->offset, true, &image_header) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to load app image header @ 0x%x", partition->offset);
-        return;
-    }
-
     uint32_t drom_addr = 0;
     uint32_t drom_load_addr = 0;
     uint32_t drom_size = 0;
@@ -549,117 +557,39 @@ static void unpack_load_app(const esp_partition_pos_t* partition)
     uint32_t irom_load_addr = 0;
     uint32_t irom_size = 0;
 
-    /* Reload the RTC memory segments whenever a non-deepsleep reset
-       is occurring */
-    bool load_rtc_memory = rtc_get_reset_reason(0) != DEEPSLEEP_RESET;
-
-    ESP_LOGD(TAG, "bin_header: %u %u %u %u %08x", image_header.magic,
-             image_header.segment_count,
-             image_header.spi_mode,
-             image_header.spi_size,
-             (unsigned)image_header.entry_addr);
-
-    /* Important: From here on this function cannot access any global data (bss/data segments),
-       as loading the app image may overwrite these.
-    */
-    for (int segment = 0; segment < image_header.segment_count; segment++) {
-        esp_image_segment_header_t segment_header;
-        uint32_t data_offs;
-        if(esp_image_load_segment_header(segment, partition->offset,
-                                         &image_header, true,
-                                         &segment_header, &data_offs) != ESP_OK) {
-            ESP_LOGE(TAG, "failed to load segment header #%d", segment);
-            return;
-        }
-
-        const uint32_t address = segment_header.load_addr;
-        bool load = true;
-        bool map = false;
-        if (address == 0x00000000) {        // padding, ignore block
-            load = false;
-        }
-        if (address == 0x00000004) {
-            load = false;                   // md5 checksum block
-            // TODO: actually check md5
-        }
-
-        if (address >= SOC_DROM_LOW && address < SOC_DROM_HIGH) {
-            ESP_LOGD(TAG, "found drom segment, map from %08x to %08x", data_offs,
-                      segment_header.load_addr);
-            drom_addr = data_offs;
-            drom_load_addr = segment_header.load_addr;
-            drom_size = segment_header.data_len + sizeof(segment_header);
-            load = false;
-            map = true;
-        }
-
-        if (address >= SOC_IROM_LOW && address < SOC_IROM_HIGH) {
-            ESP_LOGD(TAG, "found irom segment, map from %08x to %08x", data_offs,
-                      segment_header.load_addr);
-            irom_addr = data_offs;
-            irom_load_addr = segment_header.load_addr;
-            irom_size = segment_header.data_len + sizeof(segment_header);
-            load = false;
-            map = true;
-        }
-
-        if (!load_rtc_memory && address >= SOC_RTC_IRAM_LOW && address < SOC_RTC_IRAM_HIGH) {
-            ESP_LOGD(TAG, "Skipping RTC code segment at %08x\n", data_offs);
-            load = false;
-        }
-
-        if (!load_rtc_memory && address >= SOC_RTC_DATA_LOW && address < SOC_RTC_DATA_HIGH) {
-            ESP_LOGD(TAG, "Skipping RTC data segment at %08x\n", data_offs);
-            load = false;
-        }
-
-        ESP_LOGI(TAG, "segment %d: paddr=0x%08x vaddr=0x%08x size=0x%05x (%6d) %s", segment, data_offs - sizeof(esp_image_segment_header_t),
-                 segment_header.load_addr, segment_header.data_len, segment_header.data_len, (load)?"load":(map)?"map":"");
-
-        if (load) {
-            intptr_t sp, start_addr, end_addr;
-            ESP_LOGV(TAG, "bootloader_mmap data_offs=%08x data_len=%08x", data_offs, segment_header.data_len);
-
-            start_addr = segment_header.load_addr;
-            end_addr = start_addr + segment_header.data_len;
-
-            /* Before loading segment, check it doesn't clobber
-               bootloader RAM... */
-
-            if (end_addr < 0x40000000) {
-                sp = (intptr_t)get_sp();
-                if (end_addr > sp) {
-                    ESP_LOGE(TAG, "Segment %d end address %08x overlaps bootloader stack %08x - can't load",
-                         segment, end_addr, sp);
-                    return;
-                }
-                if (end_addr > sp - 256) {
-                    /* We don't know for sure this is the stack high water mark, so warn if
-                       it seems like we may overflow.
-                    */
-                    ESP_LOGW(TAG, "Segment %d end address %08x close to stack pointer %08x",
-                             segment, end_addr, sp);
-                }
+    // Find DROM & IROM addresses, to configure cache mappings
+    for (int i = 0; i < data->image.segment_count; i++) {
+        const esp_image_segment_header_t *header = &data->segments[i];
+        if (header->load_addr >= SOC_IROM_LOW && header->load_addr < SOC_IROM_HIGH) {
+            if (drom_addr != 0) {
+                ESP_LOGE(TAG, MAP_ERR_MSG, "DROM");
+            } else {
+                ESP_LOGD(TAG, "Mapping segment %d as %s", i, "DROM");
             }
-
-            const void *data = bootloader_mmap(data_offs, segment_header.data_len);
-            if(!data) {
-                ESP_LOGE(TAG, "bootloader_mmap(0x%xc, 0x%x) failed",
-                         data_offs, segment_header.data_len);
-                return;
+            drom_addr = data->segment_data[i];
+            drom_load_addr = header->load_addr;
+            drom_size = header->data_len;
+        }
+        if (header->load_addr >= SOC_DROM_LOW && header->load_addr < SOC_DROM_HIGH) {
+            if (irom_addr != 0) {
+                ESP_LOGE(TAG, MAP_ERR_MSG, "IROM");
+            } else {
+                ESP_LOGD(TAG, "Mapping segment %d as %s", i, "IROM");
             }
-            memcpy((void *)segment_header.load_addr, data, segment_header.data_len);
-            bootloader_munmap(data);
+            irom_addr = data->segment_data[i];
+            irom_load_addr = header->load_addr;
+            irom_size = header->data_len;
         }
     }
 
+    ESP_LOGD(TAG, "calling set_cache_and_start_app");
     set_cache_and_start_app(drom_addr,
         drom_load_addr,
         drom_size,
         irom_addr,
         irom_load_addr,
         irom_size,
-        image_header.entry_addr);
+        data->image.entry_addr);
 }
 
 static void set_cache_and_start_app(
@@ -674,6 +604,14 @@ static void set_cache_and_start_app(
     ESP_LOGD(TAG, "configure drom and irom and start");
     Cache_Read_Disable( 0 );
     Cache_Flush( 0 );
+
+    /* Clear the MMU entries that are already set up,
+       so the new app only has the mappings it creates.
+    */
+    for (int i = 0; i < DPORT_FLASH_MMU_TABLE_SIZE; i++) {
+        DPORT_PRO_FLASH_MMU_TABLE[i] = DPORT_FLASH_MMU_TABLE_INVALID_VAL;
+    }
+
     uint32_t drom_page_count = (drom_size + 64*1024 - 1) / (64*1024); // round up to 64k
     ESP_LOGV(TAG, "d mmu set paddr=%08x vaddr=%08x size=%d n=%d", drom_addr & 0xffff0000, drom_load_addr & 0xffff0000, drom_size, drom_page_count );
     int rc = cache_flash_mmu_set( 0, 0, drom_load_addr & 0xffff0000, drom_addr & 0xffff0000, 64, drom_page_count );
@@ -732,7 +670,7 @@ static void update_flash_config(const esp_image_header_t* pfhdr)
     Cache_Read_Enable( 0 );
 }
 
-void print_flash_info(const esp_image_header_t* phdr)
+static void print_flash_info(const esp_image_header_t* phdr)
 {
 #if (BOOT_LOG_LEVEL >= BOOT_LOG_LEVEL_NOTICE)
 
@@ -805,38 +743,100 @@ void print_flash_info(const esp_image_header_t* phdr)
 }
 
 
-static void clock_configure(void)
+static void vddsdio_configure()
 {
-    /* Set CPU to 80MHz. Keep other clocks unmodified. */
-    rtc_cpu_freq_t cpu_freq = RTC_CPU_FREQ_80M;
-
-    /* On ESP32 rev 0, switching to 80MHz if clock was previously set to
-     * 240 MHz may cause the chip to lock up (see section 3.5 of the errata
-     * document). For rev. 0, switch to 240 instead if it was chosen in
-     * menuconfig.
-     */
-    uint32_t chip_ver_reg = REG_READ(EFUSE_BLK0_RDATA3_REG);
-    if ((chip_ver_reg & EFUSE_RD_CHIP_VER_REV1_M) == 0 &&
-            CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ == 240) {
-        cpu_freq = RTC_CPU_FREQ_240M;
+#if CONFIG_BOOTLOADER_VDDSDIO_BOOST
+    rtc_vddsdio_config_t cfg = rtc_vddsdio_get_config();
+    if (cfg.enable == 1 && cfg.tieh == 0) {    // VDDSDIO regulator is enabled @ 1.8V
+        cfg.drefh = 3;
+        cfg.drefm = 3;
+        cfg.drefl = 3;
+        cfg.force = 1;
+        rtc_vddsdio_set_config(cfg);
+        ets_delay_us(10); // wait for regulator to become stable
     }
+#endif // CONFIG_BOOTLOADER_VDDSDIO_BOOST
+}
 
-    uart_tx_wait_idle(0);
-    rtc_clk_config_t clk_cfg = RTC_CLK_CONFIG_DEFAULT();
-    clk_cfg.xtal_freq = CONFIG_ESP32_XTAL_FREQ;
-    clk_cfg.cpu_freq = cpu_freq;
-    clk_cfg.slow_freq = rtc_clk_slow_freq_get();
-    clk_cfg.fast_freq = rtc_clk_fast_freq_get();
-    rtc_clk_init(clk_cfg);
-    /* As a slight optimization, if 32k XTAL was enabled in sdkconfig, we enable
-     * it here. Usually it needs some time to start up, so we amortize at least
-     * part of the start up time by enabling 32k XTAL early.
-     * App startup code will wait until the oscillator has started up.
-     */
-    if (!rtc_clk_32k_enabled()) {
-        rtc_clk_32k_bootstrap();
+
+#define FLASH_CLK_IO      6
+#define FLASH_CS_IO       11
+#define FLASH_SPIQ_IO     7
+#define FLASH_SPID_IO     8
+#define FLASH_SPIWP_IO    10
+#define FLASH_SPIHD_IO    9
+#define FLASH_IO_MATRIX_DUMMY_40M   1
+#define FLASH_IO_MATRIX_DUMMY_80M   2
+static void IRAM_ATTR flash_gpio_configure()
+{
+    int spi_cache_dummy = 0;
+    int drv = 2;
+#if CONFIG_FLASHMODE_QIO
+    spi_cache_dummy = SPI0_R_QIO_DUMMY_CYCLELEN;   //qio 3
+#elif CONFIG_FLASHMODE_QOUT
+    spi_cache_dummy = SPI0_R_FAST_DUMMY_CYCLELEN;  //qout 7
+#elif CONFIG_FLASHMODE_DIO
+    spi_cache_dummy = SPI0_R_DIO_DUMMY_CYCLELEN;   //dio 3
+#elif CONFIG_FLASHMODE_DOUT
+    spi_cache_dummy = SPI0_R_FAST_DUMMY_CYCLELEN;  //dout 7
+#endif
+    /* dummy_len_plus values defined in ROM for SPI flash configuration */
+    extern uint8_t g_rom_spiflash_dummy_len_plus[];
+#if CONFIG_ESPTOOLPY_FLASHFREQ_40M
+    g_rom_spiflash_dummy_len_plus[0] = FLASH_IO_MATRIX_DUMMY_40M;
+    g_rom_spiflash_dummy_len_plus[1] = FLASH_IO_MATRIX_DUMMY_40M;
+    SET_PERI_REG_BITS(SPI_USER1_REG(0), SPI_USR_DUMMY_CYCLELEN_V, spi_cache_dummy + FLASH_IO_MATRIX_DUMMY_40M, SPI_USR_DUMMY_CYCLELEN_S);  //DUMMY
+#elif CONFIG_ESPTOOLPY_FLASHFREQ_80M
+    g_rom_spiflash_dummy_len_plus[0] = FLASH_IO_MATRIX_DUMMY_80M;
+    g_rom_spiflash_dummy_len_plus[1] = FLASH_IO_MATRIX_DUMMY_80M;
+    SET_PERI_REG_BITS(SPI_USER1_REG(0), SPI_USR_DUMMY_CYCLELEN_V, spi_cache_dummy + FLASH_IO_MATRIX_DUMMY_80M, SPI_USR_DUMMY_CYCLELEN_S);  //DUMMY
+    drv = 3;
+#endif
+
+    uint32_t chip_ver = REG_GET_FIELD(EFUSE_BLK0_RDATA3_REG, EFUSE_RD_CHIP_VER_PKG);
+    uint32_t pkg_ver = chip_ver & 0x7;
+
+    if (pkg_ver == EFUSE_RD_CHIP_VER_PKG_ESP32D2WDQ5) {
+        // For ESP32D2WD the SPI pins are already configured
+        // flash clock signal should come from IO MUX.
+        PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_CLK_U, FUNC_SD_CLK_SPICLK);
+        SET_PERI_REG_BITS(PERIPHS_IO_MUX_SD_CLK_U, FUN_DRV, drv, FUN_DRV_S);
+    } else if (pkg_ver == EFUSE_RD_CHIP_VER_PKG_ESP32PICOD2) {
+        // For ESP32PICOD2 the SPI pins are already configured
+        // flash clock signal should come from IO MUX.
+        PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_CLK_U, FUNC_SD_CLK_SPICLK);
+        SET_PERI_REG_BITS(PERIPHS_IO_MUX_SD_CLK_U, FUN_DRV, drv, FUN_DRV_S);
+    } else if (pkg_ver == EFUSE_RD_CHIP_VER_PKG_ESP32PICOD4) {
+        // For ESP32PICOD4 the SPI pins are already configured
+        // flash clock signal should come from IO MUX.
+        PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_CLK_U, FUNC_SD_CLK_SPICLK);
+        SET_PERI_REG_BITS(PERIPHS_IO_MUX_SD_CLK_U, FUN_DRV, drv, FUN_DRV_S);
+    } else {
+        const uint32_t spiconfig = ets_efuse_get_spiconfig();
+        if (spiconfig == EFUSE_SPICONFIG_SPI_DEFAULTS) {
+            gpio_matrix_out(FLASH_CS_IO, SPICS0_OUT_IDX, 0, 0);
+            gpio_matrix_out(FLASH_SPIQ_IO, SPIQ_OUT_IDX, 0, 0);
+            gpio_matrix_in(FLASH_SPIQ_IO, SPIQ_IN_IDX, 0);
+            gpio_matrix_out(FLASH_SPID_IO, SPID_OUT_IDX, 0, 0);
+            gpio_matrix_in(FLASH_SPID_IO, SPID_IN_IDX, 0);
+            gpio_matrix_out(FLASH_SPIWP_IO, SPIWP_OUT_IDX, 0, 0);
+            gpio_matrix_in(FLASH_SPIWP_IO, SPIWP_IN_IDX, 0);
+            gpio_matrix_out(FLASH_SPIHD_IO, SPIHD_OUT_IDX, 0, 0);
+            gpio_matrix_in(FLASH_SPIHD_IO, SPIHD_IN_IDX, 0);
+            //select pin function gpio
+            PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_DATA0_U, PIN_FUNC_GPIO);
+            PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_DATA1_U, PIN_FUNC_GPIO);
+            PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_DATA2_U, PIN_FUNC_GPIO);
+            PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_DATA3_U, PIN_FUNC_GPIO);
+            PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_CMD_U, PIN_FUNC_GPIO);
+            // flash clock signal should come from IO MUX.
+            // set drive ability for clock
+            PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_CLK_U, FUNC_SD_CLK_SPICLK);
+            SET_PERI_REG_BITS(PERIPHS_IO_MUX_SD_CLK_U, FUN_DRV, drv, FUN_DRV_S);
+        }
     }
 }
+
 
 static void uart_console_configure(void)
 {
@@ -849,8 +849,7 @@ static void uart_console_configure(void)
     uartAttach();
     ets_install_uart_printf();
 
-    // ROM bootloader may have put a lot of text into UART0 FIFO.
-    // Wait for it to be printed.
+    // Wait for UART FIFO to be empty.
     uart_tx_wait_idle(0);
 
 #if CONFIG_CONSOLE_UART_CUSTOM
@@ -884,7 +883,7 @@ static void uart_console_configure(void)
 #endif // CONFIG_CONSOLE_UART_NONE
 }
 
-static void wdt_reset_info_enable(void)
+static void wdt_reset_cpu0_info_enable(void)
 {
     // We do not reset core1 info here because it didn't work before cpu1 was up. So we put it into call_start_cpu1.
     DPORT_REG_SET_BIT(DPORT_PRO_CPU_RECORD_CTRL_REG, DPORT_PRO_CPU_PDEBUG_ENABLE | DPORT_PRO_CPU_RECORD_ENABLE);
@@ -958,5 +957,11 @@ static void wdt_reset_check(void)
         wdt_reset_info_dump(0);
         wdt_reset_info_dump(1);
     }
-    wdt_reset_info_enable();
+    wdt_reset_cpu0_info_enable();
+}
+
+void __assert_func(const char *file, int line, const char *func, const char *expr)
+{
+    ESP_LOGE(TAG, "Assert failed in %s, %s:%d (%s)", func, file, line, expr);
+    while(1) {}
 }

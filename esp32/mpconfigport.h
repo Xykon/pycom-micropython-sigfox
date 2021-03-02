@@ -65,6 +65,7 @@
 #define MICROPY_PY_BUILTINS_SLICE                   (1)
 #define MICROPY_PY_BUILTINS_PROPERTY                (1)
 #define MICROPY_PY_BUILTINS_EXECFILE                (1)
+#define MICROPY_PY_WEBSOCKET                        (1)
 #define MICROPY_PY___FILE__                         (1)
 #define MICROPY_PY_GC                               (1)
 #define MICROPY_PY_ARRAY                            (1)
@@ -91,6 +92,7 @@
 #define MICROPY_PY_URE                              (1)
 #define MICROPY_PY_MACHINE                          (1)
 #define MICROPY_PY_MICROPYTHON_MEM_INFO             (1)
+#define MICROPY_PY_UTIMEQ                           (1)
 #define MICROPY_CPYTHON_COMPAT                      (1)
 #define MICROPY_LONGINT_IMPL                        (MICROPY_LONGINT_IMPL_MPZ)
 #define MICROPY_FLOAT_IMPL                          (MICROPY_FLOAT_IMPL_FLOAT)
@@ -116,6 +118,7 @@
 
 #define MICROPY_ENABLE_EMERGENCY_EXCEPTION_BUF      (1)
 #define MICROPY_EMERGENCY_EXCEPTION_BUF_SIZE        (0)
+#define MICROPY_KBD_EXCEPTION                       (1)
 
 #ifndef BOOTLOADER_BUILD
 #include "freertos/FreeRTOS.h"
@@ -167,12 +170,14 @@ extern const struct _mp_obj_module_t pycom_module;
 extern const struct _mp_obj_module_t mp_module_uhashlib;
 extern const struct _mp_obj_module_t module_ucrypto;
 extern const struct _mp_obj_module_t mp_module_ussl;
+extern const struct _mp_obj_module_t mp_module_uqueue;
 
 #define MICROPY_PORT_BUILTIN_MODULES \
     { MP_OBJ_NEW_QSTR(MP_QSTR_umachine),        (mp_obj_t)&machine_module },      \
     { MP_OBJ_NEW_QSTR(MP_QSTR_uos),             (mp_obj_t)&mp_module_uos },       \
     { MP_OBJ_NEW_QSTR(MP_QSTR_network),         (mp_obj_t)&mp_module_network },   \
     { MP_OBJ_NEW_QSTR(MP_QSTR_usocket),         (mp_obj_t)&mp_module_usocket },   \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_uselect),         (mp_obj_t)&mp_module_uselect },   \
     { MP_OBJ_NEW_QSTR(MP_QSTR_utime),           (mp_obj_t)&utime_module },        \
     { MP_OBJ_NEW_QSTR(MP_QSTR_pycom),           (mp_obj_t)&pycom_module },        \
     { MP_OBJ_NEW_QSTR(MP_QSTR_uhashlib),        (mp_obj_t)&mp_module_uhashlib },  \
@@ -180,6 +185,7 @@ extern const struct _mp_obj_module_t mp_module_ussl;
     { MP_OBJ_NEW_QSTR(MP_QSTR_ubinascii),       (mp_obj_t)&mp_module_ubinascii }, \
     { MP_OBJ_NEW_QSTR(MP_QSTR_ussl),            (mp_obj_t)&mp_module_ussl },      \
     { MP_OBJ_NEW_QSTR(MP_QSTR_uerrno),          (mp_obj_t)&mp_module_uerrno },    \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_uqueue),          (mp_obj_t)&mp_module_uqueue },    \
 
 #define MICROPY_PORT_BUILTIN_MODULE_WEAK_LINKS \
     { MP_OBJ_NEW_QSTR(MP_QSTR_machine),         (mp_obj_t)&machine_module },      \
@@ -195,6 +201,7 @@ extern const struct _mp_obj_module_t mp_module_ussl;
     { MP_OBJ_NEW_QSTR(MP_QSTR_crypto),          (mp_obj_t)&module_ucrypto },      \
     { MP_OBJ_NEW_QSTR(MP_QSTR_ssl),             (mp_obj_t)&mp_module_ussl },      \
     { MP_OBJ_NEW_QSTR(MP_QSTR_errno),           (mp_obj_t)&mp_module_uerrno },    \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_queue),           (mp_obj_t)&mp_module_uqueue },    \
 
 // extra constants
 #define MICROPY_PORT_CONSTANTS \
@@ -230,10 +237,14 @@ extern const struct _mp_obj_module_t mp_module_ussl;
 // board specifics
 #define MICROPY_MPHALPORT_H                                     "esp32_mphal.h"
 #define MICROPY_HW_MCU_NAME                                     "ESP32"
-#define MICROPY_PORT_SFLASH_BLOCK_COUNT                         127
+#define MICROPY_PORT_SFLASH_BLOCK_COUNT_4MB                     127
+#define MICROPY_PORT_SFLASH_BLOCK_COUNT_8MB                     1024
 
 #define DEFAULT_AP_PASSWORD                                     "www.pycom.io"
 #define DEFAULT_AP_CHANNEL                                      (6)
+
+#define MICROPY_FIRST_GEN_ANT_SELECT_PIN_NUM                    (16)
+#define MICROPY_SECOND_GEN_ANT_SELECT_PIN_NUM                   (21)
 
 #define _assert(expr)   ((expr) ? (void)0 : __assert_func(__FILE__, __LINE__, __func__, #expr))
 

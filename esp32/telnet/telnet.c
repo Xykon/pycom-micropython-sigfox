@@ -13,7 +13,9 @@
 #include "py/mpconfig.h"
 #include "py/obj.h"
 #include "py/mphal.h"
+#include "readline.h"
 #include "telnet.h"
+#include "serverstask.h"
 
 #include "esp_heap_caps.h"
 #include "sdkconfig.h"
@@ -27,7 +29,6 @@
 #include "modusocket.h"
 //#include "debug.h"
 #include "utils/interrupt_char.h"
-#include "serverstask.h"
 #include "genhdr/mpversion.h"
 
 #include "lwip/sockets.h"
@@ -153,8 +154,8 @@ static void telnet_reset_buffer (void);
  DEFINE PUBLIC FUNCTIONS
  ******************************************************************************/
 void telnet_init (void) {
-    // Allocate memory for the receive buffer (from the RTOS heap)
-    telnet_data.rxBuffer = pvPortMalloc(TELNET_RX_BUFFER_SIZE);
+    // allocate memory for the receive buffer (from the RTOS heap)
+    telnet_data.rxBuffer = heap_caps_malloc(TELNET_RX_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     telnet_data.state = E_TELNET_STE_DISABLED;
 }
 
@@ -501,7 +502,7 @@ static int telnet_process_IAC (uint8_t **strR, uint8_t **strW, int32_t *len, uin
         (*len) -= 3;
         return 0;
     } else {
-        // no enough characters to continue
+        // not enough characters to continue
         *len -= remaining;
         return remaining;
     }
@@ -531,10 +532,16 @@ static void telnet_parse_input (uint8_t *str, int32_t *len) {
             continue;
         }
 
-        // in this case the server is not operating on binary mode
-        if (ch > 127 || ch == 0 || (telnet_data.state == E_TELNET_STE_LOGGED_IN && ch == mp_interrupt_char)) {
+        // in this case the server is not operating in binary mode
+        if (ch > 127 || ch == 0 || (telnet_data.state == E_TELNET_STE_LOGGED_IN &&
+            (ch == mp_interrupt_char || ch == CHAR_CTRL_F))) {
             if (ch == mp_interrupt_char) {
                 mp_keyboard_interrupt();
+            } else if (ch == CHAR_CTRL_F) {
+                *str++ = CHAR_CTRL_D;
+                mp_hal_reset_safe_and_boot(false);
+                _str++;
+                continue;
             }
             // skip this char
             (*len)--;
@@ -548,18 +555,27 @@ static void telnet_parse_input (uint8_t *str, int32_t *len) {
 static bool telnet_send_with_retries (int32_t sd, const void *pBuf, int32_t len) {
     int32_t retries = 0;
     uint32_t delay = TELNET_WAIT_TIME_MS;
-    // only if we are not within interrupt context and interrupts are enabled
-//    if ((HAL_NVIC_INT_CTRL_REG & HAL_VECTACTIVE_MASK) == 0 && query_irq() == IRQ_STATE_ENABLED) { // FIXME
-        do {
-            if (send(sd, pBuf, len, 0) > 0) {
-                return true;
-            } else if (EAGAIN != errno) {
-                return false;
-            }
-            // start with the default delay and increment it on each retry
-            mp_hal_delay_ms(delay++);
-        } while (++retries <= TELNET_TX_RETRIES_MAX);
-//    }
+
+    do {
+        // make it blocking
+        uint32_t option = fcntl(sd, F_GETFL, 0);
+        option &= ~O_NONBLOCK;
+        fcntl(sd, F_SETFL, option);
+        if (send(sd, pBuf, len, 0) > 0) {
+            // make it non-blocking again
+            option |= O_NONBLOCK;
+            fcntl(sd, F_SETFL, option);
+            return true;
+        } else if (EAGAIN != errno) {
+            // make it non-blocking again
+            option |= O_NONBLOCK;
+            fcntl(sd, F_SETFL, option);
+            return false;
+        }
+        // start with the default delay and increment it on each retry
+        mp_hal_delay_ms(delay++);
+    } while (++retries <= TELNET_TX_RETRIES_MAX);
+
     return false;
 }
 

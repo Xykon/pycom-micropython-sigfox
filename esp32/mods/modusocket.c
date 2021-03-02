@@ -126,7 +126,7 @@ void modusocket_socket_delete (int32_t sd) {
 //
 //    for (int i = 0; i < MOD_NETWORK_MAX_SOCKETS; i++) {
 //        int32_t sd;
-//        if ((sd = modusocket_sockets[i].sd) >= 0) {
+//        if ((sd = modusocket_sockets[i].u.sd) >= 0) {
 //            FD_SET(sd, &socketset);
 //            maxfd = (maxfd > sd) ? maxfd : sd;
 //        }
@@ -142,7 +142,7 @@ void modusocket_close_all_user_sockets (void) {
 //    sl_LockObjLock (&modusocket_LockObj, SL_OS_WAIT_FOREVER);
     for (int i = 0; i < MODUSOCKET_MAX_SOCKETS; i++) {
         if (modusocket_sockets[i].sd >= 0 && modusocket_sockets[i].user) {
-//            sl_Close(modusocket_sockets[i].sd); // FIXME
+//            sl_Close(modusocket_sockets[i].u.sd); // FIXME
             modusocket_sockets[i].sd = -1;
         }
     }
@@ -154,8 +154,8 @@ void modusocket_close_all_user_sockets (void) {
 
 STATIC void socket_select_nic(mod_network_socket_obj_t *self, const byte *ip) {
     if (self->sock_base.nic == MP_OBJ_NULL) {
-        // select a nic (based on some criteria TBD)
-        self->sock_base.nic = mod_network_find_nic(ip);
+        // select a nic
+        self->sock_base.nic = mod_network_find_nic(self, ip);
         self->sock_base.nic_type = (mod_network_nic_type_t*)mp_obj_get_type(self->sock_base.nic);
     }
 }
@@ -166,42 +166,43 @@ STATIC mp_obj_t socket_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_
 
     // create socket object
     mod_network_socket_obj_t *s = m_new_obj_with_finaliser(mod_network_socket_obj_t);
+    s->sock_base.nic_type = MP_OBJ_NULL;
     if (n_args > 0 &&
         (mp_obj_get_int(args[0]) == AF_LORA || mp_obj_get_int(args[0]) == AF_SIGFOX))
     {
         s->base.type = (mp_obj_t)&raw_socket_type;
-        s->sock_base.u_param.type = SOCK_RAW;
+        s->sock_base.u.u_param.type = SOCK_RAW;
     } else {
         s->base.type = (mp_obj_t)&socket_type;
-        s->sock_base.u_param.domain = AF_INET;
-        s->sock_base.u_param.type = SOCK_STREAM;
-        s->sock_base.u_param.proto = IPPROTO_TCP;
+        s->sock_base.u.u_param.domain = AF_INET;
+        s->sock_base.u.u_param.type = SOCK_STREAM;
+        s->sock_base.u.u_param.proto = IPPROTO_TCP;
     }
     s->sock_base.nic = MP_OBJ_NULL;
     s->sock_base.nic_type = NULL;
-    s->sock_base.u_param.fileno = -1;
+    s->sock_base.u.u_param.fileno = -1;
     s->sock_base.timeout = -1;      // sockets are blocking by default
     s->sock_base.is_ssl = false;
     s->sock_base.connected = false;
 
     if (n_args > 0) {
-        s->sock_base.u_param.domain = mp_obj_get_int(args[0]);
+        s->sock_base.u.u_param.domain = mp_obj_get_int(args[0]);
         if (n_args > 1) {
-            s->sock_base.u_param.type = mp_obj_get_int(args[1]);
+            s->sock_base.u.u_param.type = mp_obj_get_int(args[1]);
             if (n_args > 2) {
-                s->sock_base.u_param.proto = mp_obj_get_int(args[2]);
+                s->sock_base.u.u_param.proto = mp_obj_get_int(args[2]);
                 if (n_args > 3) {
-                    s->sock_base.u_param.fileno = mp_obj_get_int(args[3]);
+                    s->sock_base.u.u_param.fileno = mp_obj_get_int(args[3]);
                 }
             }
         }
     }
 
     // don't forget to select a network card
-    if (s->sock_base.u_param.domain == AF_INET) {
+    if (s->sock_base.u.u_param.domain == AF_INET) {
         socket_select_nic(s, (const byte *)"");
     } else {
-        if (s->sock_base.u_param.type != SOCK_RAW) {
+        if (s->sock_base.u.u_param.type != SOCK_RAW) {
             nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "incorrect socket type"));
         }
         socket_select_nic(s, NULL);
@@ -213,15 +214,25 @@ STATIC mp_obj_t socket_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_
         nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
     }
     // add the socket to the list
-    modusocket_socket_add(s->sock_base.sd, true);
+    modusocket_socket_add(s->sock_base.u.sd, true);
 
     return s;
 }
 
+STATIC mp_obj_t socket_fileno(mp_obj_t self_in) {
+    mod_network_socket_obj_t *self = self_in;
+    return MP_OBJ_NEW_SMALL_INT(self->sock_base.u.sd);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(socket_fileno_obj, socket_fileno);
+
 // method socket.close()
 STATIC mp_obj_t socket_close(mp_obj_t self_in) {
     mod_network_socket_obj_t *self = self_in;
-    self->sock_base.nic_type->n_close(self);
+    // this is to prevent the finalizer to close a socket that failed during creation
+    if (self->sock_base.nic_type && self->sock_base.u.sd >= 0) {
+        self->sock_base.nic_type->n_close(self);
+        self->sock_base.u.sd = -1;
+    }
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(socket_close_obj, socket_close);
@@ -231,7 +242,7 @@ STATIC mp_obj_t socket_bind(mp_obj_t self_in, mp_obj_t addr_in) {
     mod_network_socket_obj_t *self = self_in;
     int _errno;
 
-#ifdef LOPY
+#if defined (LOPY) || defined(LOPY4) || defined(FIPY)
     if (self->sock_base.nic_type == &mod_network_nic_type_lora) {
         mp_uint_t port = mp_obj_get_int(addr_in);
 
@@ -247,7 +258,7 @@ STATIC mp_obj_t socket_bind(mp_obj_t self_in, mp_obj_t addr_in) {
         if (self->sock_base.nic_type->n_bind(self, ip, port, &_errno) != 0) {
             nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
         }
-#ifdef LOPY
+#if defined (LOPY) || defined(LOPY4) || defined(FIPY)
     }
 #endif
     return mp_const_none;
@@ -293,7 +304,7 @@ STATIC mp_obj_t socket_accept(mp_obj_t self_in) {
 
     MP_THREAD_GIL_ENTER();
     // add the socket to the list
-    modusocket_socket_add(socket2->sock_base.sd, true);
+    modusocket_socket_add(socket2->sock_base.u.sd, true);
 
     // make the return value
     mp_obj_tuple_t *client = mp_obj_new_tuple(2, NULL);
@@ -424,7 +435,7 @@ STATIC mp_obj_t socket_recvfrom(mp_obj_t self_in, mp_obj_t len_in) {
         vstr.buf[vstr.len] = '\0';
         tuple[0] = mp_obj_new_str_from_vstr(&mp_type_bytes, &vstr);
     }
-#ifdef LOPY
+#if defined (LOPY) || defined(LOPY4) || defined(FIPY)
     if (self->sock_base.nic_type == &mod_network_nic_type_lora) {
         tuple[1] = mp_obj_new_int(port);
     } else {
@@ -531,6 +542,7 @@ STATIC const mp_map_elem_t socket_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_settimeout),      (mp_obj_t)&socket_settimeout_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_setblocking),     (mp_obj_t)&socket_setblocking_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_makefile),        (mp_obj_t)&socket_makefile_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_fileno),          (mp_obj_t)&socket_fileno_obj },
 
     // stream methods
     { MP_OBJ_NEW_QSTR(MP_QSTR_read),            (mp_obj_t)&mp_stream_read_obj },
@@ -542,7 +554,7 @@ STATIC const mp_map_elem_t socket_locals_dict_table[] = {
 
 MP_DEFINE_CONST_DICT(socket_locals_dict, socket_locals_dict_table);
 
-#ifdef LOPY
+#if defined (LOPY) || defined(LOPY4) || defined (FIPY)
 STATIC const mp_map_elem_t raw_socket_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR___del__),         (mp_obj_t)&socket_close_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_close),           (mp_obj_t)&socket_close_obj },
@@ -677,17 +689,17 @@ STATIC const mp_map_elem_t mp_module_usocket_globals_table[] = {
 
     // class constants
     { MP_OBJ_NEW_QSTR(MP_QSTR_AF_INET),         MP_OBJ_NEW_SMALL_INT(AF_INET) },
-#ifdef LOPY
+#if defined (LOPY) || defined (LOPY4) || defined (FIPY)
     { MP_OBJ_NEW_QSTR(MP_QSTR_AF_LORA),         MP_OBJ_NEW_SMALL_INT(AF_LORA) },
 #endif
 
-#ifdef SIPY
+#if defined (SIPY) || defined (LOPY4) || defined (FIPY)
     { MP_OBJ_NEW_QSTR(MP_QSTR_AF_SIGFOX),       MP_OBJ_NEW_SMALL_INT(AF_SIGFOX) },
 #endif
 
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOCK_STREAM),     MP_OBJ_NEW_SMALL_INT(SOCK_STREAM) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOCK_DGRAM),      MP_OBJ_NEW_SMALL_INT(SOCK_DGRAM) },
-#if defined (LOPY) || defined (SIPY)
+#if defined (LOPY) || defined (SIPY) || defined (LOPY4) || defined(FIPY)
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOCK_RAW),        MP_OBJ_NEW_SMALL_INT(SOCK_RAW) },
 #endif
 
@@ -697,14 +709,18 @@ STATIC const mp_map_elem_t mp_module_usocket_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOL_LORA),        MP_OBJ_NEW_SMALL_INT(SOL_LORA) },
 #elif defined(SIPY)
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOL_SIGFOX),      MP_OBJ_NEW_SMALL_INT(SOL_SIGFOX) },
+#elif defined(FIPY) || defined(LOPY4)
+    { MP_OBJ_NEW_QSTR(MP_QSTR_SOL_LORA),        MP_OBJ_NEW_SMALL_INT(SOL_LORA) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_SOL_SIGFOX),      MP_OBJ_NEW_SMALL_INT(SOL_SIGFOX) },
 #endif
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOL_SOCKET),      MP_OBJ_NEW_SMALL_INT(SOL_SOCKET) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_SO_REUSEADDR),    MP_OBJ_NEW_SMALL_INT(SO_REUSEADDR) },
 
-#if defined(LOPY)
+#if defined(LOPY) || defined (LOPY4) || defined(FIPY)
     { MP_OBJ_NEW_QSTR(MP_QSTR_SO_CONFIRMED),    MP_OBJ_NEW_SMALL_INT(SO_LORAWAN_CONFIRMED) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_SO_DR),           MP_OBJ_NEW_SMALL_INT(SO_LORAWAN_DR) },
-#elif defined(SIPY)
+#endif
+#if defined(SIPY) || defined (LOPY4) || defined(FIPY)
      { MP_OBJ_NEW_QSTR(MP_QSTR_SO_RX),          MP_OBJ_NEW_SMALL_INT(SO_SIGFOX_RX) },
      { MP_OBJ_NEW_QSTR(MP_QSTR_SO_TX_REPEAT),   MP_OBJ_NEW_SMALL_INT(SO_SIGFOX_TX_REPEAT) },
      { MP_OBJ_NEW_QSTR(MP_QSTR_SO_OOB),         MP_OBJ_NEW_SMALL_INT(SO_SIGFOX_OOB) },

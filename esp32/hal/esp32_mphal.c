@@ -31,6 +31,9 @@
 #include "serverstask.h"
 #include "moduos.h"
 #include "mpexception.h"
+#include "modmachine.h"
+#include "updater.h"
+#include "bootloader.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -40,13 +43,13 @@
 #include "freertos/xtensa_api.h"
 
 
-#ifdef LOPY
+#if defined (LOPY) || defined(LOPY4) || defined(FIPY)
 static void (*HAL_tick_user_cb)(void);
 #endif
 
 #define TIMER_TICKS             160000        // 1 ms @160MHz
 
-#ifdef LOPY
+#if defined (LOPY) || defined(LOPY4) || defined(FIPY)
 IRAM_ATTR static void HAL_TimerCallback (TimerHandle_t xTimer) {
     if (HAL_tick_user_cb) {
         HAL_tick_user_cb();
@@ -60,7 +63,7 @@ void HAL_set_tick_cb (void *cb) {
 
 void mp_hal_init(bool soft_reset) {
     if (!soft_reset) {
-    #ifdef LOPY
+    #if defined (LOPY) || defined(LOPY4) || defined(FIPY)
         // setup the HAL timer for LoRa
         HAL_tick_user_cb = NULL;
         TimerHandle_t hal_timer = xTimerCreate("HAL_Timer", 1 / portTICK_PERIOD_MS, pdTRUE, (void *) 0, HAL_TimerCallback);
@@ -91,7 +94,7 @@ void mp_hal_delay_us(uint32_t us) {
 }
 
 int mp_hal_stdin_rx_chr(void) {
-    for ( ;; ) {
+    for ( ; ; ) {
         // read telnet first
         if (telnet_rx_any()) {
             return telnet_rx_char();
@@ -158,20 +161,40 @@ uint32_t mp_hal_ticks_s(void) {
     return now.tv_sec;
 }
 
-uint32_t mp_hal_ticks_ms(void) {
+IRAM_ATTR uint32_t mp_hal_ticks_ms(void) {
     struct timeval now;
     gettimeofday(&now, NULL);
     return now.tv_sec * 1000 + now.tv_usec / 1000;
 }
 
-uint32_t mp_hal_ticks_us(void) {
+IRAM_ATTR uint32_t mp_hal_ticks_us(void) {
     struct timeval now;
     gettimeofday(&now, NULL);
     return now.tv_sec * 1000000 + now.tv_usec;
+}
+
+IRAM_ATTR uint64_t mp_hal_ticks_ms_non_blocking(void) {
+    return esp_timer_get_time() / 1000;
+}
+
+IRAM_ATTR uint64_t mp_hal_ticks_us_non_blocking(void) {
+    return esp_timer_get_time();
 }
 
 void mp_hal_delay_ms(uint32_t delay) {
     MP_THREAD_GIL_EXIT();
     vTaskDelay (delay / portTICK_PERIOD_MS);
     MP_THREAD_GIL_ENTER();
+}
+
+void mp_hal_reset_safe_and_boot(bool reset) {
+    boot_info_t boot_info;
+    uint32_t boot_info_offset;
+    if (updater_read_boot_info (&boot_info, &boot_info_offset)) {
+        boot_info.safeboot = SAFE_BOOT_SW;
+        updater_write_boot_info (&boot_info, boot_info_offset);
+    }
+    if (reset) {
+        machine_reset();
+    }
 }

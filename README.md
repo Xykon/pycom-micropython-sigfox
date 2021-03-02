@@ -1,9 +1,3 @@
-[![Build Status][travis-img]][travis-repo] [![Coverage Status][coveralls-img]][coveralls-repo]
-[travis-img]:  https://travis-ci.org/micropython/micropython.png?branch=master
-[travis-repo]: https://travis-ci.org/micropython/micropython
-[coveralls-img]:  https://coveralls.io/repos/micropython/micropython/badge.png?branch=master
-[coveralls-repo]: https://coveralls.io/r/micropython/micropython?branch=master
-
 The MicroPython project
 =======================
 <p align="center">
@@ -22,26 +16,24 @@ MicroPython implements the entire Python 3.4 syntax (including exceptions,
 The following core datatypes are provided: str (including basic Unicode
 support), bytes, bytearray, tuple, list, dict, set, frozenset, array.array,
 collections.namedtuple, classes and instances. Builtin modules include sys,
-time, and struct, etc. Select ports have support for _thread module
+time, and struct, etc. Select ports have support for `_thread` module
 (multithreading). Note that only subset of Python 3.4 functionality
 implemented for the data types and modules.
 
 See the repository www.github.com/micropython/pyboard for the MicroPython
 board (PyBoard), the officially supported reference electronic circuit board.
 
-Major components in this repository:
+The following components are actively maintained by Pycom:
 - py/ -- the core Python implementation, including compiler, runtime, and
   core library.
-- unix/ -- a version of MicroPython that runs on Unix.
 - exp32/ -- a version of MicroPython that runs on the ESP32 based boards from Pycom.
+- tests/ -- test framework and test scripts.
+
+Additional components:
 - stmhal/ -- a version of MicroPython that runs on the PyBoard and similar
   STM32 boards (using ST's Cube HAL drivers).
 - minimal/ -- a minimal MicroPython port. Start with this if you want
   to port MicroPython to another microcontroller.
-- tests/ -- test framework and test scripts.
-- docs/ -- user documentation in Sphinx reStructuredText format.
-
-Additional components:
 - bare-arm/ -- a bare minimum version of MicroPython for ARM MCUs. Used
   mostly to control code size.
 - teensy/ -- a version of MicroPython that runs on the Teensy 3.1
@@ -51,81 +43,12 @@ Additional components:
 - esp8266/ -- an experimental port for ESP8266 WiFi modules.
 - tools/ -- various tools, including the pyboard.py module.
 - examples/ -- a few example Python scripts.
+- docs/ -- user documentation in Sphinx reStructuredText format.
 
 The subdirectories above may include READMEs with additional info.
 
 "make" is used to build the components, or "gmake" on BSD-based systems.
 You will also need bash and Python (at least 2.7 or 3.3).
-
-The Unix version
-----------------
-
-The "unix" port requires a standard Unix environment with gcc and GNU make.
-x86 and x64 architectures are supported (i.e. x86 32- and 64-bit), as well
-as ARM and MIPS. Making full-featured port to another architecture requires
-writing some assembly code for the exception handling and garbage collection.
-Alternatively, fallback implementation based on setjmp/longjmp can be used.
-
-To build (see section below for required dependencies):
-
-    $ cd unix
-    $ make axtls
-    $ make
-
-Then to give it a try:
-
-    $ ./micropython
-    >>> list(5 * x + y for x in range(10) for y in [4, 2, 1])
-
-Use `CTRL-D` (i.e. EOF) to exit the shell.
-Learn about command-line options (in particular, how to increase heap size
-which may be needed for larger applications):
-
-    $ ./micropython --help
-
-Run complete testsuite:
-
-    $ make test
-
-Unix version comes with a builtin package manager called upip, e.g.:
-
-    $ ./micropython -m upip install micropython-pystone
-    $ ./micropython -m pystone
-
-Browse available modules on
-[PyPI](https://pypi.python.org/pypi?%3Aaction=search&term=micropython).
-Standard library modules come from
-[micropython-lib](https://github.com/micropython/micropython-lib) project.
-
-External dependencies
----------------------
-
-Building Unix version requires some dependencies installed. For
-Debian/Ubuntu/Mint derivative Linux distros, install `build-essential`
-(includes toolchain and make), `libffi-dev`, and `pkg-config` packages.
-
-Other dependencies can be built together with MicroPython. Oftentimes,
-you need to do this to enable extra features or capabilities. To build
-these additional dependencies, first fetch git submodules for them:
-
-    $ git submodule update --init
-
-Use this same command to get the latest versions of dependencies, as
-they are updated from time to time. After that, in `unix/` dir, execute:
-
-    $ make deplibs
-
-This will build all available dependencies (regardless whether they
-are used or not). If you intend to build MicroPython with additional
-options (like cross-compiling), the same set of options should be passed
-to `make deplibs`. To actually enabled use of dependencies, edit
-`unix/mpconfigport.mk` file, which has inline descriptions of the options.
-For example, to build SSL module (required for `upip` tool described above),
-set `MICROPY_PY_USSL` to 1.
-
-In `unix/mpconfigport.mk`, you can also disable some dependencies enabled
-by default, like FFI support, which requires libffi development files to
-be installed.
 
 The ESP32 version
 -----------------
@@ -135,15 +58,15 @@ the Espressif website:
 
 - for 64-bit Linux::
 
-    https://dl.espressif.com/dl/xtensa-esp32-elf-linux64-1.22.0-59.tar.gz
+    https://dl.espressif.com/dl/xtensa-esp32-elf-linux64-1.22.0-80-g6c4433a-5.2.0.tar.gz
 
 - for 32-bit Linux::
 
-    https://dl.espressif.com/dl/xtensa-esp32-elf-linux32-1.22.0-59.tar.gz
+    https://dl.espressif.com/dl/xtensa-esp32-elf-linux32-1.22.0-80-g6c4433a-5.2.0.tar.gz
 
 - for Mac OS:
 
-    https://dl.espressif.com/dl/xtensa-esp32-elf-osx-1.22.0-59.tar.gz
+    https://dl.espressif.com/dl/xtensa-esp32-elf-osx-1.22.0-80-g6c4433a-5.2.0.tar.gz
 
 To use it, you will need to update your ``PATH`` environment variable in ``~/.bash_profile`` file. To make ``xtensa-esp32-elf`` available for all terminal sessions, add the following line to your ``~/.bash_profile`` file::
 
@@ -169,35 +92,138 @@ Finally, before building, export the IDF_PATH variable
 
     $ export IDF_PATH=~/pycom-esp-idf
 
-To build and flash your LoPy for 868MHz regions:
+Prior to building the main firmware, you need to build mpy-cross
+
+	$ cd mpy-cross && make clean && make && cd ..
+
+By default the firmware is built for the WIPY2:
 
     $ cd esp32
-    $ make BOARD=LOPY TARGET=boot clean
+    $ make clean
+    $ make TARGET=boot
+    $ make TARGET=app
+    $ make flash
+
+You can change the board type by using the BOARD variable:
+
+    $ cd esp32
+    $ make BOARD=GPY clean
+    $ make BOARD=GPY TARGET=boot
+    $ make BOARD=GPY TARGET=app
+    $ make BOARD=GPY flash
+
+We currently support the following BOARD types:
+
+	WIPY LOPY SIPY GPY FIPY LOPY4
+
+For LoRa, you may need to specify the `LORA_BAND` as explained below.
+
+To specify a serial port other than /dev/ttyUSB0, use ESPPORT variable:
+
+    $ # On MacOS
+    $ make ESPPORT=/dev/tty.usbserial-DQ008HQY flash
+    $ # On Windows
+    $ make ESPPORT=COM3 flash
+    $ # On linux
+    $ # make ESPPORT=/dev/ttyUSB1 flash
+
+To flash at full speed, use ESPSPEED variable:
+
+	$ make ESPSPEED=921600 flash
+
+To build and flash a LoPy:
+
+    $ cd esp32
+    $ make BOARD=LOPY clean
     $ make BOARD=LOPY TARGET=boot
-    $ make BOARD=LOPY LORA_BAND=USE_BAND_868 TARGET=app
-    $ make BOARD=LOPY LORA_BAND=USE_BAND_868 flash
+    $ make BOARD=LOPY TARGET=app
+    $ make BOARD=LOPY flash
 
-or for 915MHz regions:
+The above also applies to the FiPy and LoPy4
 
+Make sure that your board is placed into programming mode, otherwise flashing will fail.<br>
+PyTrack and PySense boards will automatically switch into programming mode<br>
+(currently supported on MacOS and Linux only!)<br><br>
+Expansion Board 2.0 users, please connect ``P2`` to ``GND`` and then reset the board.
+
+## Steps for using Secure Boot and Flash Encryption
+
+### Summary
+
+1. Obtain keys (for Secure Boot and Flash Encryption)
+2. Flash keys and parameters in efuses
+3. Compile bootloader and application with `make SECURE=on`
+4. Flash: bootloader-digest at address 0x0 and encrypted; all the others (partitions and application) encrypted, too.
+
+### Prerequisites
+
+    $ export $IDF_PATH=<pycom-esp-idf_PATH>
     $ cd esp32
-    $ make BOARD=LOPY TARGET=boot clean
-    $ make BOARD=LOPY TARGET=boot
-    $ make BOARD=LOPY LORA_BAND=USE_BAND_915 TARGET=app
-    $ make BOARD=LOPY LORA_BAND=USE_BAND_915 flash
 
-or the WiPy 2.0:
+Hold valid keys for Flash Encryption and Secure Boot; they can be generated randomly with the following commands:
 
-    $ cd esp32
-    $ make BOARD=WIPY TARGET=boot
-    $ make BOARD=WIPY TARGET=app
-    $ make BOARD=WIPY flash
+    python $IDF_PATH/components/esptool_py/esptool/espsecure.py generate_flash_encryption_key flash_encryption_key.bin
+    python $IDF_PATH/components/esptool_py/esptool/espsecure.py generate_signing_key secure_boot_signing_key.pem
 
-or the SiPy:
+The Secure Boot key `secure_boot_signing_key.pem` has to be transformed into `secure-bootloader-key.bin`, to be burnt into efuses. This can be done in 2 ways:
 
-    $ cd esp32
-    $ make BOARD=SIPY TARGET=boot
-    $ make BOARD=SIPY TARGET=app
-    $ make BOARD=SIPY flash
+    python $IDF_PATH/components/esptool_py/esptool/espefuse.py extract_public_key --keyfile secure_boot_signing_key.pem signature_verification_key.bin
 
-Make sure that your board is placed into programming mode, otherwise flahing will fail.
-To do this, connect ``P2`` to ``GND`` and then reset the board.
+    # or, as an artifact of the make build process, on the same directory level as Makefile
+    make BOARD=GPY SECURE=on TARGET=boot
+
+Flash keys (`flash_encryption_key.bin` and `secure-bootloader-key.bin`) into the efuses (write and read protected):
+
+**_Note: Irreversible operations_**
+
+    # Burning Encryption Key
+    python $IDF_PATH/components/esptool_py/esptool/espefuse.py --port /dev/ttyUSB0 burn_key flash_encryption flash_encryption_key.bin
+    # Burning Secure Boot Key
+    python $IDF_PATH/components/esptool_py/esptool/espefuse.py --port /dev/ttyUSB0 burn_key secure_boot secure-bootloader-key.bin
+    # Enabling Flash Encryption mechanism
+    python $IDF_PATH/components/esptool_py/esptool/espefuse.py --port /dev/ttyUSB0 burn_efuse FLASH_CRYPT_CNT
+    # Configuring Flash Encryption to use all address bits togheter with Encryption key (max value 0x0F)
+    python $IDF_PATH/components/esptool_py/esptool/espefuse.py --port /dev/ttyUSB0 burn_efuse FLASH_CRYPT_CONFIG 0x0F
+    # Enabling Secure Boot mechanism
+    python $IDF_PATH/components/esptool_py/esptool/espefuse.py --port /dev/ttyUSB0 burn_efuse ABS_DONE_0
+
+**_If the keys are not written in efuse, before flashing the bootloader, then random keys will be generated by the ESP32, they can never be read nor re-written, so bootloader can never be updated. Even more, the application can be re-flashed (by USB) just 3 more times._**
+
+### Makefile options:
+
+    make BOARD=GPY SECURE=on SECURE_KEY=secure_boot_signing_key.pem ENCRYPT_KEY=flash_encryption_key.bin TARGET=[boot|app]
+
+- `SECURE=on` is the main flag; it's not optional
+- if `SECURE=on` by default:
+    - encryption is enabled        
+    - secure_boot_signing_key.pem is the secure boot key, located relatively to Makefile
+    - flash_encryption_key.bin is the flash encryption key, located relatively to Makefile
+
+For flashing the bootloader digest and the encrypted versions of all binaries:
+
+    make BOARD=GPY SECURE=on flash
+
+### Flashing
+
+For flashing the bootloader-reflash-digest.bin has to be written at address 0x0, instead of the bootloader.bin (at address 0x1000).
+
+Build is done using `SECURE=on` option; additionally, all the binaries are pre-encrypted.
+
+    make BOARD=GPY clean
+    make BOARD=GPY SECURE=on TARGET=boot
+    make BOARD=GPY SECURE=on TARGET=app
+    make BOARD=GPY SECURE=on flash
+
+Manual flash command:
+
+    python $IDF_PATH/components/esptool_py/esptool/esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 --before no_reset --after no_reset write_flash -z --flash_mode dio --flash_freq 80m --flash_size detect 0x0 build/GPY/release/bootloader/bootloader-reflash-digest.bin_enc 0x8000 build/GPY/release/lib/partitions.bin_enc 0x10000 build/GPY/release/gpy.bin_enc_0x10000
+
+### OTA update
+
+The OTA should be done using the pre-encrypted application image.
+
+Because the encryption is done based on the physical flash address, there are 2 application binaries generated:
+- gpy.bin_enc_0x10000 which has to be written at default factory address: 0x10000
+- gpy.bin_enc_0x1A0000 which has to be written at the ota_0 partition address (0x1A0000)
+
+*__Hint:__ on micropython interface, the method `pycom.ota_slot()` responds with the address of the next OTA partition available (either 0x10000 or 0x1A0000).*

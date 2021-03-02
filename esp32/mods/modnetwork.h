@@ -77,15 +77,13 @@ typedef struct _mod_network_socket_base_t {
     mod_network_nic_type_t *nic_type;
     union {
         struct {
-            // this order is important so that fileno gets > 0 once
-            // the socket descriptor is assigned after being created.
             uint8_t domain;
             int8_t fileno;
             uint8_t type;
             uint8_t proto;
         } u_param;
         int32_t sd;
-    };
+    }u;
     int32_t timeout;
     bool is_ssl;
     bool connected;
@@ -103,12 +101,13 @@ extern const mod_network_nic_type_t mod_network_nic_type_wlan;
 extern const mod_network_nic_type_t mod_network_nic_type_lora;
 extern const mod_network_nic_type_t mod_network_nic_type_bt;
 extern const mod_network_nic_type_t mod_network_nic_type_sigfox;
+extern const mod_network_nic_type_t mod_network_nic_type_lte;
 
 /******************************************************************************
  DECLARE FUNCTIONS
  ******************************************************************************/
 void mod_network_init0(void);
 void mod_network_register_nic(mp_obj_t nic);
-mp_obj_t mod_network_find_nic(const uint8_t *ip);
+mp_obj_t mod_network_find_nic(const mod_network_socket_obj_t *s, const uint8_t *ip);
 
 #endif  // MODNETWORK_H_

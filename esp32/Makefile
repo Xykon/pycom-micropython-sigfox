@@ -21,17 +21,32 @@ OEM ?= 0
 # make 'release' the default build type
 BTYPE ?= release
 
-LORA_BAND ?= USE_BAND_868
-ifeq ($(BOARD), LOPY)
-    ifeq ($(LORA_BAND), USE_BAND_868)
-        LORA_FREQ = 868
-    else
-        LORA_FREQ = 915
-    endif
-    BUILD = build/$(BOARD)_$(LORA_FREQ)/$(BTYPE)
+BUILD = build/$(BOARD)/$(BTYPE)
+
+# by default Secure Boot and Flash Encryption are disabled
+SECURE ?= off
+
+ifeq ($(SECURE), on)
+	# filename of the private key, used for 2 things:
+	# 1. signing partitions.bin and board.bin
+	# 2. extracting public key, which is embedded into bootloader.bin
+	# Generation is done using command:
+	# espsecure.py generate_signing_key secure_boot_signing_key.pem
+	SECURE_KEY ?= secure_boot_signing_key.pem
+
+    # Flash Encryption key is generated using command:
+	# espsecure.py generate_flash_encryption_key flash_encryption_key.bin
+	# Writing it is done using:
+	# espefuse.py --port PORT burn_key flash_encryption flash_encryption_key.bin
+    	ENCRYPT_KEY ?= flash_encryption_key.bin
 else
-    LORA_FREQ =
-    BUILD = build/$(BOARD)/$(BTYPE)
+$(info Use make SECURE=on [optionally SECURE_KEY ?= secure_boot_signing_key.pem] to enable Secure Boot and Flash Encryption mechanisms.)
+endif # ifeq ($(SECURE), on)
+
+# Default path to the project: we assume the Makefile including this file
+# is in the project directory
+ifndef PROJECT_PATH
+PROJECT_PATH := $(abspath $(dir $(firstword $(MAKEFILE_LIST))))
 endif
 
 FROZEN_MPY_DIR = frozen
@@ -43,37 +58,49 @@ CROSS_COMPILE = xtensa-esp32-elf-
 ESP_IDF_PATH = $(IDF_PATH)
 ESP_IDF_COMP_PATH = $(ESP_IDF_PATH)/components
 
-CFLAGS_XTENSA = -DESP_PLATFORM -g3 -Wpointer-arith -Werror -Wno-error=unused-function \
+CFLAGS_XTENSA = -DESP_PLATFORM -Wpointer-arith -Wall -Werror=all -Wno-error=unused-function \
                 -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wl,-EL \
-                -mlongcalls -Wall -ffunction-sections -fdata-sections -fno-common
+                -mlongcalls -Wall -ffunction-sections -fdata-sections -fno-common \
+                -Wno-sign-compare -Wno-old-style-declaration -fstrict-volatile-bitfields \
+                -Wno-error=deprecated-declarations -Wno-unused-parameter -DWITH_POSIX \
 
-ifeq ($(TARGET), app)
-CFLAGS_XTENSA += -O2
-else
-CFLAGS_XTENSA += -Og
-endif
+CFLAGS_XTENSA_OPT = -Os
+CFLAGS_XTENSA_PSRAM = -mfix-esp32-psram-cache-issue
 
-ifeq ($(OEM), 1)
-CFLAGS_XTENSA += -mfix-esp32-psram-cache-issue
-endif
-
-CFLAGS = $(CFLAGS_XTENSA) -nostdlib -std=gnu99 -g3 -fstrict-volatile-bitfields -Iboards/$(BOARD)
+CFLAGS = $(CFLAGS_XTENSA) $(CFLAGS_XTENSA_PSRAM) $(CFLAGS_XTENSA_OPT) -nostdlib -std=gnu99 -g3 -ggdb -fstrict-volatile-bitfields -Iboards/$(BOARD)
+CFLAGS_SIGFOX = $(CFLAGS_XTENSA) -O2 -nostdlib -std=gnu99 -g3 -ggdb -fstrict-volatile-bitfields -Iboards/$(BOARD)
 
 LDFLAGS = -nostdlib -Wl,-Map=$(@:.elf=.map) -Wl,--no-check-sections -u call_user_start_cpu0
 LDFLAGS += -Wl,-static -Wl,--undefined=uxTopUsedPriority -Wl,--gc-sections
 
 LIBS = -L$(ESP_IDF_COMP_PATH)/esp32/lib -L$(ESP_IDF_COMP_PATH)/esp32/ld -L$(ESP_IDF_COMP_PATH)/bt/lib \
        -L$(ESP_IDF_COMP_PATH)/esp32 -L$(ESP_IDF_COMP_PATH)/newlib/lib -Lbootloader \
-       -Llib -lnvs_flash -ltcpip_adapter -L$(BUILD) -lhal -lcore -lwps -lcoexist \
-       -lnet80211 -lphy -lpp -lrtc -llog -lsmartconfig -lwpa -lwpa2 -lbtdm_app -lcxx -u __cxa_guard_dummy -lstdc++ \
-       -lsigfox -lspi_flash -lnvs_flash -lgcc -lnghttp -ldriver -lesp32 -lexpat \
-       $(ESP_IDF_COMP_PATH)/newlib/lib/libm.a $(ESP_IDF_COMP_PATH)/newlib/lib/libc.a \
+       -Llib -lnvs_flash -ltcpip_adapter -L$(BUILD) -lhal -lcore -lwps -lcoexist -lstdc++ \
+       -lnet80211 -lphy -lpp -lrtc -llog -lsmartconfig -lwpa -lwpa2 -lbtdm_app -lcxx -u __cxa_guard_dummy \
+       -lsigfox -lspi_flash -lnvs_flash -lgcc -lnghttp -ldriver -lesp32 -lexpat -lpthread -lesp_adc_cal \
+       $(ESP_IDF_COMP_PATH)/newlib/lib/libm-psram-workaround.a \
+       $(ESP_IDF_COMP_PATH)/newlib/lib/libc-psram-workaround.a \
        -lfreertos -ljson -ljsmn -llwip -lnewlib -lvfs -lopenssl -lmbedtls -lwpa_supplicant \
-       -lxtensa-debug-module -lbt -lsdmmc -lsoc -lheap sigfox/modsigfox.a
+       -lxtensa-debug-module -lbt -lsdmmc -lsoc -lheap -lbootloader_support -lmicro-ecc -u ld_include_panic_highint_hdl \
 
-B_LIBS = -Lbootloader/lib -Lbootloader -L$(BUILD)/bootloader \
-         -L$(ESP_IDF_COMP_PATH)/esp32/lib -Lbootloader -llog -lcore -lbootloader_support \
-         -lspi_flash -lsoc -lmicro-ecc
+ifeq ($(BOARD), $(filter $(BOARD), FIPY))
+    LIBS += sigfox/modsigfox_fipy.a
+endif
+
+ifeq ($(BOARD), $(filter $(BOARD), LOPY4))
+    LIBS += sigfox/modsigfox_lopy4.a
+endif
+
+ifeq ($(BOARD), $(filter $(BOARD), SIPY))
+    LIBS += sigfox/modsigfox_sipy.a
+endif
+
+B_LIBS = -Lbootloader/lib -Lbootloader -L$(BUILD)/bootloader -L$(ESP_IDF_COMP_PATH)/esp32/ld \
+         -L$(ESP_IDF_COMP_PATH)/esp32/lib -llog -lcore -lbootloader_support \
+         -lspi_flash -lsoc -lmicro-ecc -lgcc -lstdc++ -lgcov
+
+# objcopy paramters, to transform a binary file into an object file
+OBJCOPY_EMBED_ARGS = --input-target binary --output-target elf32-xtensa-le --binary-architecture xtensa --rename-section .data=.rodata.embedded
 
 # qstr definitions (must come before including py.mk)
 QSTR_DEFS = qstrdefsport.h $(BUILD)/pins_qstr.h
